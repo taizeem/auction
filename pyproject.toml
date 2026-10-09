@@ -1,0 +1,29 @@
+[project]
+name = "live-auction"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "taizeem0@gmail.com", email = "taizeem0@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "celery>=5.6.3",
+    "channels>=4.3.2",
+    "channels-redis>=4.3.0",
+    "daphne>=4.2.3",
+    "django>=6.0.9",
+    "django-celery-beat>=2.9.0",
+    "djangorestframework>=3.18.3",
+    "djangorestframework-simplejwt>=5.5.1",
+    "psycopg[binary]>=3.3.6",
+    "python-dotenv>=1.2.4",
+    "redis>=8.1.0",
+]
+
+[project.scripts]
+live-auction = "live_auction:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
