@@ -2,6 +2,7 @@ from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 from django.contrib.auth import get_user_model
+from django.db import connections
 from django.test import TransactionTestCase
 from django.utils import timezone
 from auctions.models import Auction, Bid
@@ -11,11 +12,6 @@ User = get_user_model()
 
 
 class ConcurrentBiddingServiceTests(TransactionTestCase):
-    """
-    Uses TransactionTestCase so that multiple threads have isolated database connections
-    and can directly exercise PostgreSQL row-level locks (select_for_update).
-    """
-
     def setUp(self):
         self.auction = Auction.objects.create(
             title="Vintage Rolex Submariner",
@@ -24,7 +20,6 @@ class ConcurrentBiddingServiceTests(TransactionTestCase):
             ends_at=timezone.now() + timedelta(hours=1),
             status=Auction.Status.ACTIVE,
         )
-        # Create 10 distinct bidder accounts
         self.bidders = [
             User.objects.create_user(
                 username=f"bidder_{i}",
@@ -34,14 +29,12 @@ class ConcurrentBiddingServiceTests(TransactionTestCase):
             for i in range(10)
         ]
 
-    def test_concurrent_bidding_prevents_race_conditions(self):
-        """
-        Launches 10 simultaneous threads bidding at the exact same moment.
-        Only strictly higher bids that acquire the row lock can succeed.
-        """
-        # Assign ascending bid increments: 1100, 1200, ... 2000
-        bid_amounts = [Decimal(f"{1100 + (i * 100)}.00") for i in range(10)]
+    def tearDown(self):
+        # Guarantee all thread connections are closed when tests finish
+        connections.close_all()
 
+    def test_concurrent_bidding_prevents_race_conditions(self):
+        bid_amounts = [Decimal(f"{1100 + (i * 100)}.00") for i in range(10)]
         successful_bids = []
         failed_bids = []
 
@@ -55,8 +48,10 @@ class ConcurrentBiddingServiceTests(TransactionTestCase):
                 return True, result
             except AuctionDomainException as exc:
                 return False, str(exc)
+            finally:
+                # Crucial on PostgreSQL: close each thread-local connection
+                connections.close_all()
 
-        # Execute all 10 bids across separate worker threads concurrently
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [
                 executor.submit(worker, self.bidders[i], bid_amounts[i])
@@ -69,17 +64,13 @@ class ConcurrentBiddingServiceTests(TransactionTestCase):
                 else:
                     failed_bids.append(data)
 
-        # Refresh auction state from the database
         self.auction.refresh_from_db()
-
-        # Database state must remain consistent
         highest_recorded_bid = Bid.objects.filter(auction=self.auction).order_by("-amount").first()
         self.assertEqual(self.auction.current_price, highest_recorded_bid.amount)
         self.assertEqual(self.auction.highest_bidder, highest_recorded_bid.bidder)
         self.assertGreater(len(successful_bids), 0)
 
     def test_bidding_rejected_on_expired_auction(self):
-        """Validates that expired auctions reject new bids immediately."""
         self.auction.ends_at = timezone.now() - timedelta(minutes=5)
         self.auction.save()
 

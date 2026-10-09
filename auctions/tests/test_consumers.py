@@ -1,7 +1,8 @@
 from decimal import Decimal
 from datetime import timedelta
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.db import connections
+from django.test import TransactionTestCase
 from django.utils import timezone
 from channels.testing import WebsocketCommunicator
 from rest_framework_simplejwt.tokens import AccessToken
@@ -11,9 +12,11 @@ from auctions.models import Auction
 User = get_user_model()
 
 
-class AuctionConsumerTests(TestCase):
+class AuctionConsumerTests(TransactionTestCase):
+    def tearDown(self):
+        connections.close_all()
+
     async def test_authenticated_websocket_bid_flow(self):
-        # 1. Prepare user and auction
         user = await User.objects.acreate(
             username="ws_bidder",
             password="Password123!",
@@ -30,18 +33,15 @@ class AuctionConsumerTests(TestCase):
         token = str(AccessToken.for_user(user))
         path = f"/ws/auctions/{auction.id}/?token={token}"
 
-        # 2. Connect client communicator
         communicator = WebsocketCommunicator(application, path)
         connected, _ = await communicator.connect()
         self.assertTrue(connected)
 
-        # 3. Send bid command
         await communicator.send_json_to({
             "action": "place_bid",
             "amount": "75.00",
         })
 
-        # 4. Receive broadcast message
         response = await communicator.receive_json_from()
         self.assertEqual(response["type"], "new_bid")
         self.assertEqual(response["data"]["amount"], "75.00")
@@ -57,7 +57,7 @@ class AuctionConsumerTests(TestCase):
             ends_at=timezone.now() + timedelta(hours=1),
             status=Auction.Status.ACTIVE,
         )
-        # Connect without JWT token parameter
+
         communicator = WebsocketCommunicator(application, f"/ws/auctions/{auction.id}/")
         connected, _ = await communicator.connect()
         self.assertTrue(connected)
