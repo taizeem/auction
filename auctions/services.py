@@ -6,16 +6,22 @@ from .models import Auction, Bid
 
 
 class AuctionDomainException(Exception):
+    """Domain exception raised when business rules are violated."""
     pass
 
 
-# Anti-sniping parameters (can also be pulled from settings/.env)
+# Anti-sniping parameters
 ANTI_SNIPE_THRESHOLD_SECONDS = 120  # Trigger if bid arrives in the final 2 minutes
 AUTO_EXTEND_SECONDS = 120           # Reset clock to 2 minutes from now
 
 
 @transaction.atomic
 def execute_bid(auction_id: str, user, amount: Decimal) -> dict:
+    """
+    Acquires an exclusive row lock on the auction record via PostgreSQL SELECT ... FOR UPDATE.
+    Evaluates price constraints, extends deadlines on late bids (anti-sniping),
+    and updates state atomically.
+    """
     try:
         auction = Auction.objects.select_for_update().get(id=auction_id)
     except Auction.DoesNotExist:
@@ -41,7 +47,6 @@ def execute_bid(auction_id: str, user, amount: Decimal) -> dict:
         raise AuctionDomainException("You are already the highest bidder on this item.")
 
     # 4. Soft-Close / Auto-Extend Check
-    # If the bid arrives within the threshold window, extend ends_at
     remaining_time = auction.ends_at - now
     extended = False
     update_fields = ["current_price", "highest_bidder", "updated_at"]
@@ -70,4 +75,34 @@ def execute_bid(auction_id: str, user, amount: Decimal) -> dict:
         "ends_at": auction.ends_at.isoformat(),
         "extended": extended,
         "timestamp": bid.created_at.isoformat(),
+    }
+
+
+@transaction.atomic
+def close_auction(auction_id: str) -> dict:
+    """
+    Closes an expired auction and records the winning bidder atomically.
+    Called by Celery Beat scheduled tasks.
+    """
+    try:
+        auction = Auction.objects.select_for_update().get(id=auction_id)
+    except Auction.DoesNotExist:
+        raise AuctionDomainException("Auction not found.")
+
+    if auction.status != Auction.Status.ACTIVE:
+        return {
+            "auction_id": str(auction.id),
+            "status": auction.status,
+            "already_closed": True,
+        }
+
+    auction.status = Auction.Status.CLOSED
+    auction.save(update_fields=["status", "updated_at"])
+
+    return {
+        "auction_id": str(auction.id),
+        "status": auction.status,
+        "winner": auction.highest_bidder.username if auction.highest_bidder else None,
+        "final_price": str(auction.current_price),
+        "already_closed": False,
     }

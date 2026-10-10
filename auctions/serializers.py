@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Auction
+from .models import Auction, Bid
 
 
 class AuctionSerializer(serializers.ModelSerializer):
@@ -46,6 +46,19 @@ class AuctionSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        # Automatically initialize current_price to the starting_price on creation
         validated_data["current_price"] = validated_data["starting_price"]
         return super().create(validated_data)
+
+
+class BidHistorySerializer(serializers.ModelSerializer):
+    bidder_username = serializers.CharField(source="bidder.username", read_only=True)
+
+    class Meta:
+        model = Bid
+        fields = [
+            "id",
+            "bidder_username",
+            "amount",
+            "created_at",
+        ]
+        read_only_fields = fields
