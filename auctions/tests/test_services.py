@@ -82,3 +82,49 @@ class ConcurrentBiddingServiceTests(TransactionTestCase):
             )
 
         self.assertIn("expired", str(ctx.exception))
+
+
+
+
+class AutoExtendServiceTests(TransactionTestCase):
+    def setUp(self):
+        self.user_a = User.objects.create_user(username="bidder_a", password="pw")
+        self.user_b = User.objects.create_user(username="bidder_b", password="pw")
+
+    def test_bid_outside_threshold_does_not_extend_deadline(self):
+        # Auction ending in 10 minutes (threshold is 2 minutes)
+        original_end = timezone.now() + timedelta(minutes=10)
+        auction = Auction.objects.create(
+            title="Standard Item",
+            starting_price=Decimal("100.00"),
+            current_price=Decimal("100.00"),
+            ends_at=original_end,
+            status=Auction.Status.ACTIVE,
+        )
+
+        result = execute_bid(str(auction.id), self.user_a, Decimal("110.00"))
+
+        auction.refresh_from_db()
+        self.assertFalse(result["extended"])
+        # Timestamp remains unchanged
+        self.assertEqual(auction.ends_at, original_end)
+
+    def test_bid_inside_threshold_extends_deadline(self):
+        # Auction ending in 45 seconds (inside the 120s threshold)
+        initial_end = timezone.now() + timedelta(seconds=45)
+        auction = Auction.objects.create(
+            title="Sniped Item",
+            starting_price=Decimal("100.00"),
+            current_price=Decimal("100.00"),
+            ends_at=initial_end,
+            status=Auction.Status.ACTIVE,
+        )
+
+        result = execute_bid(str(auction.id), self.user_a, Decimal("150.00"))
+
+        auction.refresh_from_db()
+        self.assertTrue(result["extended"])
+        # The new ends_at must now be roughly 120 seconds in the future
+        remaining_seconds = (auction.ends_at - timezone.now()).total_seconds()
+        self.assertGreater(remaining_seconds, 100)
+        self.assertGreater(auction.ends_at, initial_end)

@@ -72,3 +72,34 @@ class AuctionConsumerTests(TransactionTestCase):
         self.assertIn("Authentication required", response["message"])
 
         await communicator.disconnect()
+
+class AutoExtendConsumerTests(TransactionTestCase):
+    async def test_websocket_broadcasts_extension_flag(self):
+        user = await User.objects.acreate(username="late_bidder", password="pw")
+        # Item closing in 30 seconds
+        auction = await Auction.objects.acreate(
+            title="Expiring Item",
+            starting_price=Decimal("50.00"),
+            current_price=Decimal("50.00"),
+            ends_at=timezone.now() + timedelta(seconds=30),
+            status=Auction.Status.ACTIVE,
+        )
+
+        token = str(AccessToken.for_user(user))
+        communicator = WebsocketCommunicator(
+            application, f"/ws/auctions/{auction.id}/?token={token}"
+        )
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+
+        await communicator.send_json_to({
+            "action": "place_bid",
+            "amount": "60.00",
+        })
+
+        response = await communicator.receive_json_from()
+        self.assertEqual(response["type"], "new_bid")
+        self.assertTrue(response["data"]["extended"])
+        self.assertIn("ends_at", response["data"])
+
+        await communicator.disconnect()
