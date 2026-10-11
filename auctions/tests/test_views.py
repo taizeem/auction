@@ -1,3 +1,4 @@
+import uuid
 from decimal import Decimal
 from datetime import timedelta
 from django.contrib.auth import get_user_model
@@ -5,7 +6,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
-from auctions.models import Auction
+from auctions.models import Auction, Bid
 
 User = get_user_model()
 
