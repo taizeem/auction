@@ -6,8 +6,8 @@ from rest_framework import generics, permissions, filters, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import get_object_or_404
-from .models import Auction, Bid, ProxyBid
-from .services import execute_proxy_bid, AuctionDomainException, execute_buy_it_now
+from .models import Auction, Bid, ProxyBid, Order
+from .services import execute_proxy_bid, AuctionDomainException, execute_buy_it_now, settle_order_payment
 from .serializers import (
     AuctionSerializer,
     BidHistorySerializer,
@@ -15,6 +15,8 @@ from .serializers import (
     ProxyBidSerializer,
     SetProxyBidSerializer,
     mask_username,
+    OrderSerializer,
+    PaymentSubmitSerializer,
 )
 from .pagination import StandardResultsSetPagination
 
@@ -246,5 +248,39 @@ class AuctionBuyItNowView(APIView):
                     },
                 },
             )
+
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class OrderDetailView(generics.RetrieveAPIView):
+    """
+    GET /api/orders/<uuid:pk>/ -> Retrieve order details (buyer or staff only).
+    """
+    serializer_class = OrderSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Order.objects.filter(buyer=self.request.user).select_related("auction", "buyer")
+
+
+class OrderPayView(APIView):
+    """
+    POST /api/orders/<uuid:pk>/pay/ -> Submits payment settlement for a pending order.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        serializer = PaymentSubmitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        txn_id = serializer.validated_data.get("transaction_id") or "txn_mock_success"
+
+        try:
+            result = settle_order_payment(
+                order_id=str(pk),
+                user=request.user,
+                transaction_id=txn_id,
+            )
+        except AuctionDomainException as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(result, status=status.HTTP_200_OK)

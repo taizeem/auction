@@ -2,7 +2,7 @@ from asgiref.sync import async_to_sync
 from celery import shared_task
 from channels.layers import get_channel_layer
 from django.utils import timezone
-from .models import Auction
+from .models import Auction, Order
 from .services import close_auction
 
 
@@ -35,3 +35,17 @@ def check_and_close_expired_auctions():
             )
 
     return f"Closed {closed_count} expired auctions at {now.isoformat()}"
+
+
+@shared_task
+def expire_overdue_orders():
+    """
+    Marks orders as EXPIRED if the buyer failed to pay within the deadline window.
+    """
+    now = timezone.now()
+    overdue_orders = Order.objects.filter(
+        status=Order.Status.PENDING_PAYMENT,
+        payment_due_at__lte=now,
+    )
+    count = overdue_orders.update(status=Order.Status.EXPIRED)
+    return f"Expired {count} overdue order(s)."

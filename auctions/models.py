@@ -116,3 +116,43 @@ class ProxyBid(models.Model):
 
     def __str__(self):
         return f"{self.bidder.username} - {self.auction.title}: ${self.max_amount}"
+
+
+class Order(models.Model):
+    class Status(models.TextChoices):
+        PENDING_PAYMENT = "PENDING", "Pending Payment"
+        PAID = "PAID", "Paid"
+        EXPIRED = "EXPIRED", "Expired"
+        CANCELLED = "CANCELLED", "Cancelled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    auction = models.OneToOneField(
+        Auction, on_delete=models.CASCADE, related_name="order"
+    )
+    buyer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="orders"
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.PENDING_PAYMENT
+    )
+    payment_due_at = models.DateTimeField(
+        help_text="Deadline before the order expires and winner defaults."
+    )
+    paid_at = models.DateTimeField(null=True, blank=True)
+    transaction_id = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["status", "payment_due_at"]),
+            models.Index(fields=["buyer", "status"]),
+        ]
+
+    def __str__(self):
+        return f"Order {self.id} - {self.auction.title} (${self.amount})"
+
+    @property
+    def is_payment_overdue(self) -> bool:
+        return timezone.now() > self.payment_due_at

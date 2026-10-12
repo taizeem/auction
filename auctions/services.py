@@ -2,7 +2,7 @@ from decimal import Decimal
 from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
-from .models import Auction, Bid, ProxyBid
+from .models import Auction, Bid, ProxyBid, Order
 
 
 class AuctionDomainException(Exception):
@@ -12,6 +12,7 @@ class AuctionDomainException(Exception):
 
 ANTI_SNIPE_THRESHOLD_SECONDS = 120
 AUTO_EXTEND_SECONDS = 120
+PAYMENT_WINDOW_HOURS = 24
 
 
 def get_minimum_increment(current_price: Decimal) -> Decimal:
@@ -191,9 +192,6 @@ def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
 
 @transaction.atomic
 def close_auction(auction_id: str) -> dict:
-    """
-    Closes an expired auction. If a reserve price is set and unmet, marks UNSOLD.
-    """
     try:
         auction = Auction.objects.select_for_update().get(id=auction_id)
     except Auction.DoesNotExist:
@@ -216,11 +214,26 @@ def close_auction(auction_id: str) -> dict:
             "winner": None,
             "final_price": str(auction.current_price),
             "reserve_met": False,
+            "order_id": None,
             "already_closed": False,
         }
 
     auction.status = Auction.Status.CLOSED
     auction.save(update_fields=["status", "updated_at"])
+
+    # Instantiate order for winner
+    order_id = None
+    if auction.highest_bidder:
+        order, _ = Order.objects.get_or_create(
+            auction=auction,
+            defaults={
+                "buyer": auction.highest_bidder,
+                "amount": auction.current_price,
+                "payment_due_at": timezone.now() + timedelta(hours=PAYMENT_WINDOW_HOURS),
+                "status": Order.Status.PENDING_PAYMENT,
+            },
+        )
+        order_id = str(order.id)
 
     return {
         "auction_id": str(auction.id),
@@ -228,16 +241,13 @@ def close_auction(auction_id: str) -> dict:
         "winner": auction.highest_bidder.username if auction.highest_bidder else None,
         "final_price": str(auction.current_price),
         "reserve_met": True,
+        "order_id": order_id,
         "already_closed": False,
     }
 
 
 @transaction.atomic
 def execute_buy_it_now(auction_id: str, user) -> dict:
-    """
-    Executes instant purchase. Atomically closes the auction, awards it to the buyer,
-    and creates the winning bid record at buy_it_now_price.
-    """
     try:
         auction = Auction.objects.select_for_update().get(id=auction_id)
     except Auction.DoesNotExist:
@@ -249,7 +259,6 @@ def execute_buy_it_now(auction_id: str, user) -> dict:
     if not auction.buy_it_now_price:
         raise AuctionDomainException("Buy It Now is not available for this auction.")
 
-    # Record final purchase bid
     bid = Bid.objects.create(
         auction=auction,
         bidder=user,
@@ -261,11 +270,63 @@ def execute_buy_it_now(auction_id: str, user) -> dict:
     auction.status = Auction.Status.CLOSED
     auction.save(update_fields=["current_price", "highest_bidder", "status", "updated_at"])
 
+    # Instantiate Order for buyer
+    order, _ = Order.objects.get_or_create(
+        auction=auction,
+        defaults={
+            "buyer": user,
+            "amount": auction.buy_it_now_price,
+            "payment_due_at": timezone.now() + timedelta(hours=PAYMENT_WINDOW_HOURS),
+            "status": Order.Status.PENDING_PAYMENT,
+        },
+    )
+
     return {
         "auction_id": str(auction.id),
         "auction_title": auction.title,
         "final_price": str(auction.current_price),
         "winner": user.username,
         "bid_id": str(bid.id),
+        "order_id": str(order.id),
         "status": auction.status,
+    }
+
+
+@transaction.atomic
+def settle_order_payment(order_id: str, user, transaction_id: str) -> dict:
+    """
+    Settles an order atomically. Validates ownership, deadline, and payment status.
+    """
+    try:
+        order = Order.objects.select_for_update().get(id=order_id)
+    except Order.DoesNotExist:
+        raise AuctionDomainException("Order not found.")
+
+    if order.buyer != user:
+        raise AuctionDomainException("You do not have permission to pay for this order.")
+
+    if order.status == Order.Status.PAID:
+        raise AuctionDomainException("This order has already been paid.")
+
+    if order.status != Order.Status.PENDING_PAYMENT:
+        raise AuctionDomainException(f"Cannot settle order in '{order.status}' status.")
+
+    if order.is_payment_overdue:
+        order.status = Order.Status.EXPIRED
+        order.save(update_fields=["status", "updated_at"])
+        raise AuctionDomainException("Payment window has expired for this order.")
+
+    now = timezone.now()
+    order.status = Order.Status.PAID
+    order.paid_at = now
+    order.transaction_id = transaction_id
+    order.save(update_fields=["status", "paid_at", "transaction_id", "updated_at"])
+
+    return {
+        "order_id": str(order.id),
+        "auction_id": str(order.auction_id),
+        "amount": str(order.amount),
+        "status": order.status,
+        "transaction_id": order.transaction_id,
+        "paid_at": order.paid_at.isoformat(),
     }
