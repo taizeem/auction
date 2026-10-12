@@ -1,9 +1,15 @@
 from decimal import Decimal, InvalidOperation
 from django.utils import timezone
 from rest_framework import generics, permissions, filters
+from rest_framework.views import APIView
+from rest_framework.response import Response
 from rest_framework.generics import get_object_or_404
 from .models import Auction, Bid
-from .serializers import AuctionSerializer, BidHistorySerializer
+from .serializers import (
+    AuctionSerializer,
+    BidHistorySerializer,
+    UserProfileSerializer,
+)
 from .pagination import StandardResultsSetPagination
 
 
@@ -76,3 +82,47 @@ class AuctionBidHistoryView(generics.ListAPIView):
             .select_related("bidder")
             .order_by("-created_at")
         )
+
+
+class UserProfileView(APIView):
+    """
+    GET  /api/auctions/profile/ -> Returns profile details, won auctions, and active bids.
+    Requires SimpleJWT Authentication.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        now = timezone.now()
+        user = request.user
+
+        # 1. Closed auctions won by the authenticated user
+        won_auctions = (
+            Auction.objects.filter(
+                highest_bidder=user,
+                status=Auction.Status.CLOSED,
+            )
+            .order_by("-ends_at")
+        )
+
+        # 2. Bids placed by the user on currently active, unexpired auctions
+        active_bids = (
+            Bid.objects.filter(
+                bidder=user,
+                auction__status=Auction.Status.ACTIVE,
+                auction__ends_at__gt=now,
+            )
+            .select_related("auction", "auction__highest_bidder")
+            .order_by("-created_at")
+        )
+
+        serializer = UserProfileSerializer(
+            {
+                "user": user,
+                "won_auctions_count": won_auctions.count(),
+                "active_bids_count": active_bids.count(),
+                "won_auctions": won_auctions,
+                "active_bids": active_bids,
+            },
+            context={"request": request},
+        )
+        return Response(serializer.data)
