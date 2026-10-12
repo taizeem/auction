@@ -5,9 +5,6 @@ from .models import Auction, Bid, ProxyBid
 
 
 def mask_username(username: str | None) -> str:
-    """
-    Masks a username for public bid displays (e.g., 'john_doe' -> 'j***e').
-    """
     if not username:
         return "***"
     clean = username.strip()
@@ -21,6 +18,8 @@ class AuctionSerializer(serializers.ModelSerializer):
         source="highest_bidder.username", read_only=True
     )
     is_expired = serializers.BooleanField(read_only=True)
+    has_reserve = serializers.BooleanField(read_only=True)
+    is_reserve_met = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Auction
@@ -30,6 +29,10 @@ class AuctionSerializer(serializers.ModelSerializer):
             "description",
             "starting_price",
             "current_price",
+            "reserve_price",
+            "buy_it_now_price",
+            "has_reserve",
+            "is_reserve_met",
             "highest_bidder",
             "highest_bidder_username",
             "status",
@@ -46,6 +49,9 @@ class AuctionSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+        extra_kwargs = {
+            "reserve_price": {"write_only": True},  # Keep secret from public queries
+        }
 
     def validate_starting_price(self, value: Decimal) -> Decimal:
         if value <= Decimal("0.00"):
@@ -56,6 +62,28 @@ class AuctionSerializer(serializers.ModelSerializer):
         if value <= timezone.now():
             raise serializers.ValidationError("Auction end timestamp must be set in the future.")
         return value
+
+    def validate(self, attrs):
+        starting_price = attrs.get("starting_price")
+        reserve_price = attrs.get("reserve_price")
+        buy_it_now_price = attrs.get("buy_it_now_price")
+
+        if reserve_price and starting_price and reserve_price < starting_price:
+            raise serializers.ValidationError({
+                "reserve_price": "Reserve price must be greater than or equal to starting price."
+            })
+
+        if buy_it_now_price and starting_price and buy_it_now_price <= starting_price:
+            raise serializers.ValidationError({
+                "buy_it_now_price": "Buy It Now price must strictly exceed the starting price."
+            })
+
+        if buy_it_now_price and reserve_price and buy_it_now_price < reserve_price:
+            raise serializers.ValidationError({
+                "buy_it_now_price": "Buy It Now price cannot be lower than the reserve price."
+            })
+
+        return attrs
 
     def create(self, validated_data):
         validated_data["current_price"] = validated_data["starting_price"]

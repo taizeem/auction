@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import get_object_or_404
 from .models import Auction, Bid, ProxyBid
-from .services import execute_proxy_bid, AuctionDomainException
+from .services import execute_proxy_bid, AuctionDomainException, execute_buy_it_now
 from .serializers import (
     AuctionSerializer,
     BidHistorySerializer,
@@ -216,3 +216,35 @@ class AuctionProxyBidView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+class AuctionBuyItNowView(APIView):
+    """
+    POST /api/auctions/<uuid:pk>/buy-it-now/
+    Atomically purchases an active auction item at its buy_it_now_price.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            result = execute_buy_it_now(auction_id=str(pk), user=request.user)
+        except AuctionDomainException as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Broadcast immediate auction closure over WebSockets
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            async_to_sync(channel_layer.group_send)(
+                f"auction_{pk}",
+                {
+                    "type": "broadcast_auction_closed",
+                    "data": {
+                        "auction_id": result["auction_id"],
+                        "status": result["status"],
+                        "winner": result["winner"],
+                        "final_price": result["final_price"],
+                        "reason": "buy_it_now",
+                    },
+                },
+            )
+
+        return Response(result, status=status.HTTP_200_OK)

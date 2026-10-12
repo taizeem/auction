@@ -29,7 +29,6 @@ def get_minimum_increment(current_price: Decimal) -> Decimal:
 
 @transaction.atomic
 def execute_bid(auction_id: str, user, amount: Decimal) -> dict:
-    """Direct manual bidding."""
     try:
         auction = Auction.objects.select_for_update().get(id=auction_id)
     except Auction.DoesNotExist:
@@ -84,16 +83,11 @@ def execute_bid(auction_id: str, user, amount: Decimal) -> dict:
 
 @transaction.atomic
 def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
-    """
-    Evaluates proxy maximum budgets atomically with pessimistic locks.
-    Detects displaced highest bidder for outbid alerts.
-    """
     try:
         auction = Auction.objects.select_for_update().get(id=auction_id)
     except Auction.DoesNotExist:
         raise AuctionDomainException("Auction not found.")
 
-    # 1. Capture previous leader prior to processing
     previous_leader = auction.highest_bidder
     now = timezone.now()
 
@@ -116,7 +110,6 @@ def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
             f"Your maximum bid must be at least ${min_required:.2f}."
         )
 
-    # 2. Lock or create user's proxy budget
     user_proxy = (
         ProxyBid.objects.select_for_update()
         .filter(auction=auction, bidder=user)
@@ -137,7 +130,6 @@ def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
             max_amount=max_amount,
         )
 
-    # 3. Lock all competing proxies for evaluation
     active_proxies = list(
         ProxyBid.objects.select_for_update()
         .filter(auction=auction)
@@ -147,7 +139,6 @@ def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
     rank_1 = active_proxies[0]
     rank_2 = active_proxies[1] if len(active_proxies) > 1 else None
 
-    # 4. Resolve public price
     if rank_2 is None:
         new_price = auction.starting_price
     elif rank_1.max_amount == rank_2.max_amount:
@@ -159,7 +150,6 @@ def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
 
     new_price = max(new_price, auction.current_price)
 
-    # 5. Anti-sniping check
     remaining_time = auction.ends_at - now
     extended = False
     update_fields = ["current_price", "highest_bidder", "updated_at"]
@@ -169,13 +159,11 @@ def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
         update_fields.append("ends_at")
         extended = True
 
-    # 6. Check if previous leader was displaced
     new_leader = rank_1.bidder
     displaced_user_id = None
     if previous_leader and previous_leader.id != new_leader.id:
         displaced_user_id = str(previous_leader.id)
 
-    # 7. Persist changes
     auction.current_price = new_price
     auction.highest_bidder = new_leader
     auction.save(update_fields=update_fields)
@@ -203,6 +191,9 @@ def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
 
 @transaction.atomic
 def close_auction(auction_id: str) -> dict:
+    """
+    Closes an expired auction. If a reserve price is set and unmet, marks UNSOLD.
+    """
     try:
         auction = Auction.objects.select_for_update().get(id=auction_id)
     except Auction.DoesNotExist:
@@ -215,6 +206,19 @@ def close_auction(auction_id: str) -> dict:
             "already_closed": True,
         }
 
+    # Reserve price verification
+    if auction.reserve_price and auction.current_price < auction.reserve_price:
+        auction.status = Auction.Status.UNSOLD
+        auction.save(update_fields=["status", "updated_at"])
+        return {
+            "auction_id": str(auction.id),
+            "status": auction.status,
+            "winner": None,
+            "final_price": str(auction.current_price),
+            "reserve_met": False,
+            "already_closed": False,
+        }
+
     auction.status = Auction.Status.CLOSED
     auction.save(update_fields=["status", "updated_at"])
 
@@ -223,5 +227,45 @@ def close_auction(auction_id: str) -> dict:
         "status": auction.status,
         "winner": auction.highest_bidder.username if auction.highest_bidder else None,
         "final_price": str(auction.current_price),
+        "reserve_met": True,
         "already_closed": False,
+    }
+
+
+@transaction.atomic
+def execute_buy_it_now(auction_id: str, user) -> dict:
+    """
+    Executes instant purchase. Atomically closes the auction, awards it to the buyer,
+    and creates the winning bid record at buy_it_now_price.
+    """
+    try:
+        auction = Auction.objects.select_for_update().get(id=auction_id)
+    except Auction.DoesNotExist:
+        raise AuctionDomainException("Auction not found.")
+
+    if auction.status != Auction.Status.ACTIVE or auction.is_expired:
+        raise AuctionDomainException("This auction is not open for instant purchase.")
+
+    if not auction.buy_it_now_price:
+        raise AuctionDomainException("Buy It Now is not available for this auction.")
+
+    # Record final purchase bid
+    bid = Bid.objects.create(
+        auction=auction,
+        bidder=user,
+        amount=auction.buy_it_now_price,
+    )
+
+    auction.current_price = auction.buy_it_now_price
+    auction.highest_bidder = user
+    auction.status = Auction.Status.CLOSED
+    auction.save(update_fields=["current_price", "highest_bidder", "status", "updated_at"])
+
+    return {
+        "auction_id": str(auction.id),
+        "auction_title": auction.title,
+        "final_price": str(auction.current_price),
+        "winner": user.username,
+        "bid_id": str(bid.id),
+        "status": auction.status,
     }
