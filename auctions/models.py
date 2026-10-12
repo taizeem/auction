@@ -60,3 +60,29 @@ class Bid(models.Model):
 
     def __str__(self):
         return f"${self.amount} on {self.auction.title} by {self.bidder.username}"
+
+
+class ProxyBid(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    auction = models.ForeignKey(
+        Auction, on_delete=models.CASCADE, related_name="proxy_bids"
+    )
+    bidder = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="proxy_bids"
+    )
+    max_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["auction", "bidder"], name="unique_auction_bidder_proxy"
+            )
+        ]
+        indexes = [
+            models.Index(fields=["auction", "max_amount"]),
+        ]
+
+    def __str__(self):
+        return f"{self.bidder.username} - {self.auction.title}: ${self.max_amount}"
