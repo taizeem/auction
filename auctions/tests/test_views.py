@@ -240,3 +240,39 @@ class AuctionHTTPAPITests(APITestCase):
         post_res = self.client.post(url, {"max_amount": "140.00"}, format="json")
         self.assertEqual(post_res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("must be at least", post_res.data["detail"])
+
+    def test_buy_it_now_endpoint_authenticated_success(self):
+        buyer = User.objects.create_user(username="instant_buyer", password="pw")
+        bin_auction = Auction.objects.create(
+            title="Instant Camera",
+            starting_price=Decimal("80.00"),
+            current_price=Decimal("80.00"),
+            buy_it_now_price=Decimal("200.00"),
+            ends_at=timezone.now() + timedelta(days=1),
+            status=Auction.Status.ACTIVE,
+        )
+
+        self.client.force_authenticate(user=buyer)
+        url = reverse("auction_buy_it_now", kwargs={"pk": bin_auction.id})
+        response = self.client.post(url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["winner"], "instant_buyer")
+        self.assertEqual(response.data["final_price"], "200.00")
+
+        bin_auction.refresh_from_db()
+        self.assertEqual(bin_auction.status, Auction.Status.CLOSED)
+        self.assertEqual(bin_auction.highest_bidder, buyer)
+
+    def test_buy_it_now_endpoint_unauthenticated_rejected(self):
+        bin_auction = Auction.objects.create(
+            title="Unauth Item",
+            starting_price=Decimal("80.00"),
+            current_price=Decimal("80.00"),
+            buy_it_now_price=Decimal("200.00"),
+            ends_at=timezone.now() + timedelta(days=1),
+            status=Auction.Status.ACTIVE,
+        )
+        url = reverse("auction_buy_it_now", kwargs={"pk": bin_auction.id})
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
