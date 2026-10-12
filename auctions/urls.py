@@ -5,6 +5,7 @@ from .views import (
     AuctionBidHistoryView,
     UserProfileView,
     AuctionProxyBidView,
+    AuctionBuyItNowView,
 )
 
 urlpatterns = [
@@ -13,4 +14,5 @@ urlpatterns = [
     path("<uuid:pk>/", AuctionDetailView.as_view(), name="auction_detail"),
     path("<uuid:pk>/bids/", AuctionBidHistoryView.as_view(), name="auction_bid_history"),
     path("<uuid:pk>/proxy-bid/", AuctionProxyBidView.as_view(), name="auction_proxy_bid"),
+    path("<uuid:pk>/buy-it-now/", AuctionBuyItNowView.as_view(), name="auction_buy_it_now"),
 ]
