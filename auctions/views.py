@@ -171,9 +171,9 @@ class AuctionProxyBidView(APIView):
         except AuctionDomainException as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Broadcast public price update to connected WebSocket screens
         channel_layer = get_channel_layer()
         if channel_layer:
+            # 1. Public room broadcast
             async_to_sync(channel_layer.group_send)(
                 f"auction_{auction.id}",
                 {
@@ -189,6 +189,22 @@ class AuctionProxyBidView(APIView):
                     },
                 },
             )
+
+            # 2. Targeted outbid alert
+            displaced_id = bid_result.get("displaced_user_id")
+            if displaced_id:
+                async_to_sync(channel_layer.group_send)(
+                    f"user_{displaced_id}",
+                    {
+                        "type": "outbid_notification",
+                        "data": {
+                            "auction_id": bid_result["auction_id"],
+                            "auction_title": bid_result["auction_title"],
+                            "new_price": bid_result["amount"],
+                            "message": f"You have been outbid on '{bid_result['auction_title']}'. Current price is now ${bid_result['amount']}.",
+                        },
+                    },
+                )
 
         proxy_bid = ProxyBid.objects.get(auction=auction, bidder=request.user)
         return Response(
