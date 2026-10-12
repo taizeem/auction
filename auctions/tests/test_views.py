@@ -6,8 +6,8 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
-from auctions.models import Auction, Bid
-
+from auctions.models import Auction, Bid, Order
+from auctions.services import close_auction
 User = get_user_model()
 
 
@@ -276,3 +276,72 @@ class AuctionHTTPAPITests(APITestCase):
         url = reverse("auction_buy_it_now", kwargs={"pk": bin_auction.id})
         response = self.client.post(url)
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+class OrderSettlementTests(APITestCase):
+    def setUp(self):
+        self.winner = User.objects.create_user(username="order_winner", password="pw")
+        self.other_user = User.objects.create_user(username="other_user", password="pw")
+
+        self.auction = Auction.objects.create(
+            title="Sealed Collector Watch",
+            starting_price=Decimal("300.00"),
+            current_price=Decimal("450.00"),
+            highest_bidder=self.winner,
+            ends_at=timezone.now() - timedelta(minutes=1),
+            status=Auction.Status.ACTIVE,
+        )
+
+    def test_closing_auction_creates_pending_order(self):
+        res = close_auction(str(self.auction.id))
+        self.assertIsNotNone(res["order_id"])
+
+        order = Order.objects.get(id=res["order_id"])
+        self.assertEqual(order.buyer, self.winner)
+        self.assertEqual(order.amount, Decimal("450.00"))
+        self.assertEqual(order.status, Order.Status.PENDING_PAYMENT)
+        self.assertGreater(order.payment_due_at, timezone.now())
+
+    def test_winner_can_settle_order_payment(self):
+        close_res = close_auction(str(self.auction.id))
+        order_id = close_res["order_id"]
+
+        self.client.force_authenticate(user=self.winner)
+        url = reverse("order_pay", kwargs={"pk": order_id})
+        pay_res = self.client.post(url, {"transaction_id": "ch_stripe_mock_992"}, format="json")
+
+        self.assertEqual(pay_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(pay_res.data["status"], Order.Status.PAID)
+        self.assertEqual(pay_res.data["transaction_id"], "ch_stripe_mock_992")
+
+        order = Order.objects.get(id=order_id)
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertIsNotNone(order.paid_at)
+
+    def test_non_owner_cannot_pay_order(self):
+        close_res = close_auction(str(self.auction.id))
+        order_id = close_res["order_id"]
+
+        self.client.force_authenticate(user=self.other_user)
+        url = reverse("order_pay", kwargs={"pk": order_id})
+        pay_res = self.client.post(url, {"transaction_id": "ch_fraud"}, format="json")
+
+        self.assertEqual(pay_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("do not have permission", pay_res.data["detail"])
+
+    def test_overdue_order_settlement_rejected_and_marked_expired(self):
+        close_res = close_auction(str(self.auction.id))
+        order = Order.objects.get(id=close_res["order_id"])
+
+        # Manually backdate deadline to simulate expiration
+        order.payment_due_at = timezone.now() - timedelta(hours=1)
+        order.save(update_fields=["payment_due_at"])
+
+        self.client.force_authenticate(user=self.winner)
+        url = reverse("order_pay", kwargs={"pk": order.id})
+        pay_res = self.client.post(url, {"transaction_id": "ch_late"}, format="json")
+
+        self.assertEqual(pay_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("expired", pay_res.data["detail"])
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.EXPIRED)
