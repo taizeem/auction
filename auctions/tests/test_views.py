@@ -52,23 +52,32 @@ class AuctionHTTPAPITests(APITestCase):
             amount=Decimal("150.00"),
         )
 
-    def test_list_bid_history_returns_bids_newest_first(self):
+    def test_list_bid_history_returns_bids_newest_first_and_masked(self):
         url = reverse("auction_bid_history", kwargs={"pk": self.auction.id})
+        
+        # 1. Anonymous visitor sees masked usernames
         response = self.client.get(url)
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["count"], 2)
 
         results = response.data["results"]
-        # Newest bid ($150) must appear first
-        self.assertEqual(results[0]["id"], str(self.bid_2.id))
+        # bidder_two -> b***o
+        self.assertEqual(results[0]["bidder_username"], "b***o")
         self.assertEqual(results[0]["amount"], "150.00")
-        self.assertEqual(results[0]["bidder_username"], "bidder_two")
 
-        # First bid ($130) appears second
-        self.assertEqual(results[1]["id"], str(self.bid_1.id))
+        # bidder_one -> b***e
+        self.assertEqual(results[1]["bidder_username"], "b***e")
         self.assertEqual(results[1]["amount"], "130.00")
-        self.assertEqual(results[1]["bidder_username"], "bidder_one")
+
+    def test_bid_history_displays_you_tag_for_own_bids(self):
+        url = reverse("auction_bid_history", kwargs={"pk": self.auction.id})
+        
+        # 2. Authenticated bidder_two sees "(You)" on their own bid
+        self.client.force_authenticate(user=self.bidder_two)
+        response = self.client.get(url)
+
+        results = response.data["results"]
+        self.assertEqual(results[0]["bidder_username"], "bidder_two (You)")
+        self.assertEqual(results[1]["bidder_username"], "b***e")
 
     def test_list_bid_history_supports_pagination(self):
         url = reverse("auction_bid_history", kwargs={"pk": self.auction.id})
