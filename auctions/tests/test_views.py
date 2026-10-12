@@ -85,3 +85,97 @@ class AuctionHTTPAPITests(APITestCase):
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+    def test_unauthenticated_user_cannot_access_profile(self):
+        url = reverse("user_profile")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_authenticated_user_profile_returns_won_auctions_and_active_bids(self):
+        # 1. Auction won by bidder_one (CLOSED)
+        won_item = Auction.objects.create(
+            title="Won Vintage Camera",
+            starting_price=Decimal("200.00"),
+            current_price=Decimal("350.00"),
+            highest_bidder=self.bidder_one,
+            status=Auction.Status.CLOSED,
+            ends_at=timezone.now() - timedelta(days=1),
+        )
+
+        # 2. Auction won by bidder_two (should NOT appear in bidder_one's won list)
+        Auction.objects.create(
+            title="Other User Item",
+            starting_price=Decimal("100.00"),
+            current_price=Decimal("200.00"),
+            highest_bidder=self.bidder_two,
+            status=Auction.Status.CLOSED,
+            ends_at=timezone.now() - timedelta(days=1),
+        )
+
+        # 3. Active auction where bidder_one is CURRENTLY WINNING
+        active_winning = Auction.objects.create(
+            title="Active Guitar Auction",
+            starting_price=Decimal("500.00"),
+            current_price=Decimal("600.00"),
+            highest_bidder=self.bidder_one,
+            status=Auction.Status.ACTIVE,
+            ends_at=timezone.now() + timedelta(days=2),
+        )
+        winning_bid = Bid.objects.create(
+            auction=active_winning,
+            bidder=self.bidder_one,
+            amount=Decimal("600.00"),
+        )
+
+        # 4. Active auction where bidder_one was OUTBID by bidder_two
+        active_outbid = Auction.objects.create(
+            title="Active Painting Auction",
+            starting_price=Decimal("300.00"),
+            current_price=Decimal("450.00"),
+            highest_bidder=self.bidder_two,
+            status=Auction.Status.ACTIVE,
+            ends_at=timezone.now() + timedelta(days=3),
+        )
+        outbid_bid = Bid.objects.create(
+            auction=active_outbid,
+            bidder=self.bidder_one,
+            amount=Decimal("400.00"),
+        )
+        Bid.objects.create(
+            auction=active_outbid,
+            bidder=self.bidder_two,
+            amount=Decimal("450.00"),
+        )
+
+        # Authenticate as bidder_one
+        self.client.force_authenticate(user=self.bidder_one)
+        url = reverse("user_profile")
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Verify user details
+        self.assertEqual(response.data["user"]["username"], "bidder_one")
+        self.assertEqual(response.data["won_auctions_count"], 1)
+        self.assertEqual(response.data["active_bids_count"], 2)
+
+        # Verify won auctions
+        won_list = response.data["won_auctions"]
+        self.assertEqual(len(won_list), 1)
+        self.assertEqual(won_list[0]["id"], str(won_item.id))
+        self.assertEqual(won_list[0]["final_price"], "350.00")
+
+        # Verify active bids and is_highest_bidder flags
+        active_bids = response.data["active_bids"]
+        self.assertEqual(len(active_bids), 2)
+
+        # Find bid on active_winning
+        leading_record = next(b for b in active_bids if b["id"] == str(winning_bid.id))
+        self.assertTrue(leading_record["is_highest_bidder"])
+        self.assertEqual(leading_record["amount"], "600.00")
+        self.assertEqual(leading_record["current_price"], "600.00")
+
+        # Find bid on active_outbid
+        outbid_record = next(b for b in active_bids if b["id"] == str(outbid_bid.id))
+        self.assertFalse(outbid_record["is_highest_bidder"])
+        self.assertEqual(outbid_record["amount"], "400.00")
+        self.assertEqual(outbid_record["current_price"], "450.00")
