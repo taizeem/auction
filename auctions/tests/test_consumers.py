@@ -180,3 +180,41 @@ class AuctionConsumerTests(TransactionTestCase):
 
         await comm_a.disconnect()
         await comm_b.disconnect()
+    async def test_rapid_bid_spam_triggers_token_bucket_rate_limiter(self):
+        spammer = await User.objects.acreate(
+            username="bot_user",
+            password="pw",
+            email="bot@example.com",
+        )
+        auction = await Auction.objects.acreate(
+            title="Rate Limit Target",
+            starting_price=Decimal("10.00"),
+            current_price=Decimal("10.00"),
+            ends_at=timezone.now() + timedelta(hours=1),
+            status=Auction.Status.ACTIVE,
+        )
+
+        token = str(AccessToken.for_user(spammer))
+        path = f"/ws/auctions/{auction.id}/?token={token}"
+
+        communicator = WebsocketCommunicator(application, path)
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+        _ = await communicator.receive_json_from()  # viewer_count
+
+        # Send 3 rapid bids (consumes all 3 burst tokens)
+        for amount in ["20.00", "30.00", "40.00"]:
+            await communicator.send_json_to({"action": "place_bid", "max_amount": amount})
+            _ = await communicator.receive_json_from()  # proxy_bid_accepted
+            _ = await communicator.receive_json_from()  # new_bid
+
+        # Send 4th rapid bid immediately (burst bucket is empty)
+        await communicator.send_json_to({"action": "place_bid", "max_amount": "50.00"})
+        throttled_response = await communicator.receive_json_from()
+
+        self.assertEqual(throttled_response["type"], "error")
+        self.assertEqual(throttled_response["code"], "rate_limited")
+        self.assertIn("Bid rate limit exceeded", throttled_response["message"])
+        self.assertGreater(throttled_response["retry_after"], 0.0)
+
+        await communicator.disconnect()
