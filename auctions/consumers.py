@@ -1,22 +1,44 @@
 from decimal import Decimal, InvalidOperation
 from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
+from django.conf import settings
+import redis.asyncio as aioredis
+
 from .services import execute_proxy_bid, AuctionDomainException
 from .serializers import mask_username
+
+
+def get_redis_url() -> str:
+    """Extract Redis connection URL from Django settings with safe fallbacks."""
+    try:
+        hosts = settings.CHANNEL_LAYERS["default"]["CONFIG"]["hosts"]
+        host = hosts[0]
+        if isinstance(host, str):
+            return host
+        if isinstance(host, (list, tuple)):
+            return f"redis://{host[0]}:{host[1]}/0"
+    except (KeyError, IndexError, TypeError):
+        pass
+    return getattr(settings, "REDIS_URL", "redis://127.0.0.1:6379/0")
+
+
+# Shared asynchronous Redis connection pool
+redis_client = aioredis.from_url(get_redis_url(), decode_responses=True)
 
 
 class AuctionConsumer(AsyncJsonWebsocketConsumer):
     """
     WebSocket consumer handling real-time live bidding, anti-sniping updates,
-    and targeted outbid notifications.
+    targeted outbid notifications, and live spectator presence counters.
     """
 
     async def connect(self):
         self.auction_id = str(self.scope["url_route"]["kwargs"]["auction_id"])
         self.room_group_name = f"auction_{self.auction_id}"
+        self.presence_key = f"viewers:auction:{self.auction_id}"
         self.user = self.scope.get("user")
 
-        # 1. Join public auction group
+        # 1. Join public auction room group
         await self.channel_layer.group_add(
             self.room_group_name,
             self.channel_name,
@@ -32,14 +54,48 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
 
         await self.accept()
 
+        # 3. Register presence in Redis Set and set safety TTL
+        try:
+            await redis_client.sadd(self.presence_key, self.channel_name)
+            await redis_client.expire(self.presence_key, 86400)
+            active_viewers = await redis_client.scard(self.presence_key)
+        except Exception:
+            active_viewers = 1
+
+        # 4. Broadcast updated spectator count to all viewers in the room
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                "type": "broadcast_viewer_count",
+                "count": active_viewers,
+            },
+        )
+
     async def disconnect(self, close_code):
-        # 1. Leave public auction group
+        # 1. Remove connection from Redis presence set
+        if hasattr(self, "presence_key"):
+            try:
+                await redis_client.srem(self.presence_key, self.channel_name)
+                remaining_viewers = await redis_client.scard(self.presence_key)
+            except Exception:
+                remaining_viewers = 0
+
+            # Broadcast new count to remaining spectators
+            await self.channel_layer.group_send(
+                self.room_group_name,
+                {
+                    "type": "broadcast_viewer_count",
+                    "count": remaining_viewers,
+                },
+            )
+
+        # 2. Leave public auction room group
         await self.channel_layer.group_discard(
             self.room_group_name,
             self.channel_name,
         )
 
-        # 2. Leave private user group
+        # 3. Leave private user group
         if hasattr(self, "user_group_name"):
             await self.channel_layer.group_discard(
                 self.user_group_name,
@@ -88,7 +144,7 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 })
                 return
 
-            # Private acknowledgment to caller
+            # Private budget acknowledgment to caller
             if content.get("max_amount"):
                 await self.send_json({
                     "type": "proxy_bid_accepted",
@@ -98,7 +154,7 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                     },
                 })
 
-            # Public broadcast to auction room
+            # Public broadcast to auction room (masked username)
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {
@@ -115,7 +171,7 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 },
             )
 
-            # Targeted private notification to the displaced user
+            # Targeted private alert to displaced highest bidder
             displaced_id = bid_result.get("displaced_user_id")
             if displaced_id:
                 await self.channel_layer.group_send(
@@ -137,6 +193,10 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 "message": f"Unsupported action: '{action}'.",
             })
 
+    # -------------------------------------------------------------------------
+    # Channel Layer Group Event Handlers
+    # -------------------------------------------------------------------------
+
     async def broadcast_bid(self, event):
         await self.send_json({
             "type": "new_bid",
@@ -150,10 +210,14 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
         })
 
     async def outbid_notification(self, event):
-        """
-        Pushed directly to the user's private channel group when outbid.
-        """
         await self.send_json({
             "type": "outbid_alert",
             "data": event["data"],
+        })
+
+    async def broadcast_viewer_count(self, event):
+        """Broadcast live spectator count to the client."""
+        await self.send_json({
+            "type": "viewer_count",
+            "count": event["count"],
         })
