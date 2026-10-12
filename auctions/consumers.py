@@ -1,3 +1,4 @@
+import time
 from decimal import Decimal, InvalidOperation
 from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
@@ -25,11 +26,74 @@ def get_redis_url() -> str:
 # Shared asynchronous Redis connection pool
 redis_client = aioredis.from_url(get_redis_url(), decode_responses=True)
 
+# Rate limiter parameters: Burst capacity of 3 bids, refills 1 token every second
+RATE_LIMIT_BURST_CAPACITY = 3
+RATE_LIMIT_REFILL_RATE = 1.0  # Tokens per second
+
+# Atomic Token-Bucket Lua Script executed on Redis
+TOKEN_BUCKET_LUA = """
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refill_rate = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local cost = tonumber(ARGV[4])
+
+local data = redis.call('HMGET', key, 'tokens', 'last_updated')
+local tokens = tonumber(data[1])
+local last_updated = tonumber(data[2])
+
+if tokens == nil then
+    tokens = capacity
+    last_updated = now
+else
+    local elapsed = math.max(0, now - last_updated)
+    tokens = math.min(capacity, tokens + (elapsed * refill_rate))
+    last_updated = now
+end
+
+if tokens >= cost then
+    tokens = tokens - cost
+    redis.call('HSET', key, 'tokens', tokens, 'last_updated', last_updated)
+    redis.call('EXPIRE', key, math.ceil(capacity / refill_rate) + 10)
+    return {1, '0'}
+else
+    redis.call('HSET', key, 'tokens', tokens, 'last_updated', last_updated)
+    redis.call('EXPIRE', key, math.ceil(capacity / refill_rate) + 10)
+    local wait_time = (cost - tokens) / refill_rate
+    return {0, tostring(wait_time)}
+end
+"""
+
+
+async def is_bid_rate_limited(user_id: int | str) -> tuple[bool, float]:
+    """
+    Evaluates token availability atomically in Redis.
+    Returns: (is_allowed: bool, retry_after_seconds: float)
+    """
+    key = f"rate_limit:bid:{user_id}"
+    now = time.time()
+    try:
+        result = await redis_client.eval(
+            TOKEN_BUCKET_LUA,
+            1,
+            key,
+            RATE_LIMIT_BURST_CAPACITY,
+            RATE_LIMIT_REFILL_RATE,
+            now,
+            1,  # Cost per bid attempt
+        )
+        is_allowed = int(result[0]) == 1
+        wait_time = float(result[1]) if not is_allowed else 0.0
+        return is_allowed, wait_time
+    except Exception:
+        # Fail open if Redis is temporarily unreachable so bids are not dropped
+        return True, 0.0
+
 
 class AuctionConsumer(AsyncJsonWebsocketConsumer):
     """
     WebSocket consumer handling real-time live bidding, anti-sniping updates,
-    targeted outbid notifications, and live spectator presence counters.
+    targeted outbid notifications, spectator counters, and DDoS rate-limiting.
     """
 
     async def connect(self):
@@ -80,7 +144,6 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
             except Exception:
                 remaining_viewers = 0
 
-            # Broadcast new count to remaining spectators
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {
@@ -89,13 +152,12 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 },
             )
 
-        # 2. Leave public auction room group
+        # 2. Leave channel groups
         await self.channel_layer.group_discard(
             self.room_group_name,
             self.channel_name,
         )
 
-        # 3. Leave private user group
         if hasattr(self, "user_group_name"):
             await self.channel_layer.group_discard(
                 self.user_group_name,
@@ -107,6 +169,8 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
 
         if action == "place_bid":
             user = self.scope.get("user")
+
+            # 1. Authentication Check
             if not user or not user.is_authenticated:
                 await self.send_json({
                     "type": "error",
@@ -114,6 +178,18 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 })
                 return
 
+            # 2. Token-Bucket Rate Limiter Defense
+            allowed, retry_after = await is_bid_rate_limited(user.id)
+            if not allowed:
+                await self.send_json({
+                    "type": "error",
+                    "code": "rate_limited",
+                    "message": f"Bid rate limit exceeded. Please wait {retry_after:.1f}s before bidding again.",
+                    "retry_after": round(retry_after, 2),
+                })
+                return
+
+            # 3. Payload validation
             raw_amount = content.get("max_amount") or content.get("amount")
             if raw_amount is None:
                 await self.send_json({
@@ -131,6 +207,7 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 })
                 return
 
+            # 4. Invoke pessimistic locking transaction in PostgreSQL
             try:
                 bid_result = await sync_to_async(execute_proxy_bid)(
                     auction_id=self.auction_id,
@@ -144,7 +221,7 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 })
                 return
 
-            # Private budget acknowledgment to caller
+            # 5. Private acknowledgment if max budget was supplied
             if content.get("max_amount"):
                 await self.send_json({
                     "type": "proxy_bid_accepted",
@@ -154,7 +231,7 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                     },
                 })
 
-            # Public broadcast to auction room (masked username)
+            # 6. Public room broadcast (masked username)
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {
@@ -171,7 +248,7 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 },
             )
 
-            # Targeted private alert to displaced highest bidder
+            # 7. Targeted private alert to displaced highest bidder
             displaced_id = bid_result.get("displaced_user_id")
             if displaced_id:
                 await self.channel_layer.group_send(
@@ -216,7 +293,6 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
         })
 
     async def broadcast_viewer_count(self, event):
-        """Broadcast live spectator count to the client."""
         await self.send_json({
             "type": "viewer_count",
             "count": event["count"],
