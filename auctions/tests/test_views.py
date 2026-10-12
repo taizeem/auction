@@ -186,3 +186,48 @@ class AuctionHTTPAPITests(APITestCase):
         self.assertFalse(outbid_record["is_highest_bidder"])
         self.assertEqual(outbid_record["amount"], "400.00")
         self.assertEqual(outbid_record["current_price"], "450.00")
+
+    def test_unauthenticated_cannot_access_or_set_proxy_bid(self):
+        url = reverse("auction_proxy_bid", kwargs={"pk": self.auction.id})
+        get_res = self.client.get(url)
+        self.assertEqual(get_res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        post_res = self.client.post(url, {"max_amount": "500.00"}, format="json")
+        self.assertEqual(post_res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_get_proxy_bid_returns_404_when_none_exists(self):
+        user = User.objects.create_user(username="new_proxy_user", password="pw")
+        self.client.force_authenticate(user=user)
+
+        url = reverse("auction_proxy_bid", kwargs={"pk": self.auction.id})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_post_proxy_bid_sets_and_retrieves_budget(self):
+        user = User.objects.create_user(username="budget_setter", password="pw")
+        self.client.force_authenticate(user=user)
+
+        url = reverse("auction_proxy_bid", kwargs={"pk": self.auction.id})
+
+        # Set max budget to $300.00 (current price is $150.00)
+        post_res = self.client.post(url, {"max_amount": "300.00"}, format="json")
+        self.assertEqual(post_res.status_code, status.HTTP_200_OK)
+        self.assertTrue(post_res.data["is_leading"])
+        self.assertEqual(post_res.data["proxy_bid"]["max_amount"], "300.00")
+
+        # GET confirms private budget is visible to the authenticated user
+        get_res = self.client.get(url)
+        self.assertEqual(get_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(get_res.data["max_amount"], "300.00")
+        self.assertTrue(get_res.data["is_highest_bidder"])
+
+    def test_post_proxy_bid_rejects_budget_lower_than_required_increment(self):
+        user = User.objects.create_user(username="low_bidder", password="pw")
+        self.client.force_authenticate(user=user)
+
+        url = reverse("auction_proxy_bid", kwargs={"pk": self.auction.id})
+
+        # Current price is $150.00. Submitting $140.00 must fail.
+        post_res = self.client.post(url, {"max_amount": "140.00"}, format="json")
+        self.assertEqual(post_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("must be at least", post_res.data["detail"])
