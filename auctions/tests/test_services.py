@@ -6,7 +6,7 @@ from django.db import connections
 from django.test import TransactionTestCase
 from django.utils import timezone
 from auctions.models import Auction, Bid
-from auctions.services import execute_bid, AuctionDomainException
+from auctions.services import execute_bid, AuctionDomainException, execute_proxy_bid
 
 User = get_user_model()
 
