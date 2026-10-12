@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Auction, Bid
+from .models import Auction, Bid, ProxyBid
 
 
 class AuctionSerializer(serializers.ModelSerializer):
@@ -124,3 +124,38 @@ class UserProfileSerializer(serializers.Serializer):
     active_bids_count = serializers.IntegerField()
     won_auctions = WonAuctionSerializer(many=True)
     active_bids = ActiveBidSerializer(many=True)
+
+
+class ProxyBidSerializer(serializers.ModelSerializer):
+    auction_id = serializers.UUIDField(source="auction.id", read_only=True)
+    auction_title = serializers.CharField(source="auction.title", read_only=True)
+    current_price = serializers.DecimalField(
+        source="auction.current_price", max_digits=12, decimal_places=2, read_only=True
+    )
+    is_highest_bidder = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProxyBid
+        fields = [
+            "id",
+            "auction_id",
+            "auction_title",
+            "max_amount",
+            "current_price",
+            "is_highest_bidder",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_is_highest_bidder(self, obj) -> bool:
+        return obj.auction.highest_bidder_id == obj.bidder_id
+
+
+class SetProxyBidSerializer(serializers.Serializer):
+    max_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal("0.01"),
+        required=True,
+    )

@@ -1,23 +1,24 @@
 from decimal import Decimal, InvalidOperation
 from django.utils import timezone
-from rest_framework import generics, permissions, filters
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+from rest_framework import generics, permissions, filters, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import get_object_or_404
-from .models import Auction, Bid
+from .models import Auction, Bid, ProxyBid
+from .services import execute_proxy_bid, AuctionDomainException
 from .serializers import (
     AuctionSerializer,
     BidHistorySerializer,
     UserProfileSerializer,
+    ProxyBidSerializer,
+    SetProxyBidSerializer,
 )
 from .pagination import StandardResultsSetPagination
 
 
 class AuctionListCreateView(generics.ListCreateAPIView):
-    """
-    GET  /api/auctions/      -> List all active auctions (paginated, searchable, filterable).
-    POST /api/auctions/      -> Create a new auction item (authenticated users only).
-    """
     serializer_class = AuctionSerializer
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -58,18 +59,12 @@ class AuctionListCreateView(generics.ListCreateAPIView):
 
 
 class AuctionDetailView(generics.RetrieveAPIView):
-    """
-    GET  /api/auctions/<uuid:pk>/ -> Retrieve full details for a single auction item.
-    """
     queryset = Auction.objects.select_related("highest_bidder").all()
     serializer_class = AuctionSerializer
     permission_classes = [permissions.AllowAny]
 
 
 class AuctionBidHistoryView(generics.ListAPIView):
-    """
-    GET  /api/auctions/<uuid:pk>/bids/ -> List all historical bids for an auction, newest first.
-    """
     serializer_class = BidHistorySerializer
     pagination_class = StandardResultsSetPagination
     permission_classes = [permissions.AllowAny]
@@ -85,17 +80,12 @@ class AuctionBidHistoryView(generics.ListAPIView):
 
 
 class UserProfileView(APIView):
-    """
-    GET  /api/auctions/profile/ -> Returns profile details, won auctions, and active bids.
-    Requires SimpleJWT Authentication.
-    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         now = timezone.now()
         user = request.user
 
-        # 1. Closed auctions won by the authenticated user
         won_auctions = (
             Auction.objects.filter(
                 highest_bidder=user,
@@ -104,7 +94,6 @@ class UserProfileView(APIView):
             .order_by("-ends_at")
         )
 
-        # 2. Bids placed by the user on currently active, unexpired auctions
         active_bids = (
             Bid.objects.filter(
                 bidder=user,
@@ -126,3 +115,71 @@ class UserProfileView(APIView):
             context={"request": request},
         )
         return Response(serializer.data)
+
+
+class AuctionProxyBidView(APIView):
+    """
+    GET  /api/auctions/<uuid:pk>/proxy-bid/ -> View caller's max budget for this item.
+    POST /api/auctions/<uuid:pk>/proxy-bid/ -> Create or raise caller's max proxy budget.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, pk):
+        auction = get_object_or_404(Auction, id=pk)
+        proxy_bid = (
+            ProxyBid.objects.filter(auction=auction, bidder=request.user)
+            .select_related("auction")
+            .first()
+        )
+        if not proxy_bid:
+            return Response(
+                {"detail": "No proxy budget set for this auction."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        serializer = ProxyBidSerializer(proxy_bid)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, pk):
+        auction = get_object_or_404(Auction, id=pk)
+        input_serializer = SetProxyBidSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        max_amount = input_serializer.validated_data["max_amount"]
+
+        try:
+            bid_result = execute_proxy_bid(
+                auction_id=str(auction.id),
+                user=request.user,
+                max_amount=max_amount,
+            )
+        except AuctionDomainException as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Broadcast public price update to connected WebSocket clients
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            async_to_sync(channel_layer.group_send)(
+                f"auction_{auction.id}",
+                {
+                    "type": "broadcast_bid",
+                    "bid_data": {
+                        "auction_id": bid_result["auction_id"],
+                        "amount": bid_result["amount"],
+                        "highest_bidder": bid_result["highest_bidder"],
+                        "bid_id": bid_result["bid_id"],
+                        "ends_at": bid_result["ends_at"],
+                        "extended": bid_result["extended"],
+                        "timestamp": bid_result["timestamp"],
+                    },
+                },
+            )
+
+        proxy_bid = ProxyBid.objects.get(auction=auction, bidder=request.user)
+        return Response(
+            {
+                "proxy_bid": ProxyBidSerializer(proxy_bid).data,
+                "is_leading": bid_result["is_caller_leading"],
+                "current_price": bid_result["amount"],
+                "extended": bid_result["extended"],
+            },
+            status=status.HTTP_200_OK,
+        )
