@@ -292,35 +292,42 @@ def execute_buy_it_now(auction_id: str, user) -> dict:
     }
 
 
-@transaction.atomic
 def settle_order_payment(order_id: str, user, transaction_id: str) -> dict:
     """
     Settles an order atomically. Validates ownership, deadline, and payment status.
+    If the order is overdue, commits the EXPIRED status before raising the domain error.
     """
-    try:
-        order = Order.objects.select_for_update().get(id=order_id)
-    except Order.DoesNotExist:
-        raise AuctionDomainException("Order not found.")
+    is_overdue = False
 
-    if order.buyer != user:
-        raise AuctionDomainException("You do not have permission to pay for this order.")
+    with transaction.atomic():
+        try:
+            order = Order.objects.select_for_update().get(id=order_id)
+        except Order.DoesNotExist:
+            raise AuctionDomainException("Order not found.")
 
-    if order.status == Order.Status.PAID:
-        raise AuctionDomainException("This order has already been paid.")
+        if order.buyer != user:
+            raise AuctionDomainException("You do not have permission to pay for this order.")
 
-    if order.status != Order.Status.PENDING_PAYMENT:
-        raise AuctionDomainException(f"Cannot settle order in '{order.status}' status.")
+        if order.status == Order.Status.PAID:
+            raise AuctionDomainException("This order has already been paid.")
 
-    if order.is_payment_overdue:
-        order.status = Order.Status.EXPIRED
-        order.save(update_fields=["status", "updated_at"])
+        if order.status != Order.Status.PENDING_PAYMENT:
+            raise AuctionDomainException(f"Cannot settle order in '{order.status}' status.")
+
+        if order.is_payment_overdue:
+            order.status = Order.Status.EXPIRED
+            order.save(update_fields=["status", "updated_at"])
+            is_overdue = True
+        else:
+            now = timezone.now()
+            order.status = Order.Status.PAID
+            order.paid_at = now
+            order.transaction_id = transaction_id
+            order.save(update_fields=["status", "paid_at", "transaction_id", "updated_at"])
+
+    # Raise after the atomic transaction has safely committed the EXPIRED state
+    if is_overdue:
         raise AuctionDomainException("Payment window has expired for this order.")
-
-    now = timezone.now()
-    order.status = Order.Status.PAID
-    order.paid_at = now
-    order.transaction_id = transaction_id
-    order.save(update_fields=["status", "paid_at", "transaction_id", "updated_at"])
 
     return {
         "order_id": str(order.id),
