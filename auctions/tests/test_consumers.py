@@ -17,6 +17,50 @@ class AuctionConsumerTests(TransactionTestCase):
     def tearDown(self):
         connections.close_all()
 
+    async def test_live_spectator_counter_increments_and_decrements(self):
+        auction = await Auction.objects.acreate(
+            title="Presence Test Item",
+            starting_price=Decimal("100.00"),
+            current_price=Decimal("100.00"),
+            ends_at=timezone.now() + timedelta(hours=1),
+            status=Auction.Status.ACTIVE,
+        )
+
+        path = f"/ws/auctions/{auction.id}/"
+
+        # 1. First viewer connects
+        client_1 = WebsocketCommunicator(application, path)
+        connected_1, _ = await client_1.connect()
+        self.assertTrue(connected_1)
+
+        msg_1 = await client_1.receive_json_from()
+        self.assertEqual(msg_1["type"], "viewer_count")
+        self.assertEqual(msg_1["count"], 1)
+
+        # 2. Second viewer connects
+        client_2 = WebsocketCommunicator(application, path)
+        connected_2, _ = await client_2.connect()
+        self.assertTrue(connected_2)
+
+        # Both clients receive the incremented count of 2
+        msg_2_self = await client_2.receive_json_from()
+        self.assertEqual(msg_2_self["type"], "viewer_count")
+        self.assertEqual(msg_2_self["count"], 2)
+
+        msg_1_update = await client_1.receive_json_from()
+        self.assertEqual(msg_1_update["type"], "viewer_count")
+        self.assertEqual(msg_1_update["count"], 2)
+
+        # 3. Second viewer disconnects
+        await client_2.disconnect()
+
+        # Client 1 receives the decremented count of 1
+        msg_1_after_disconnect = await client_1.receive_json_from()
+        self.assertEqual(msg_1_after_disconnect["type"], "viewer_count")
+        self.assertEqual(msg_1_after_disconnect["count"], 1)
+
+        await client_1.disconnect()
+
     async def test_authenticated_websocket_bid_flow(self):
         user = await User.objects.acreate(
             username="ws_bidder",
@@ -38,6 +82,11 @@ class AuctionConsumerTests(TransactionTestCase):
         connected, _ = await communicator.connect()
         self.assertTrue(connected)
 
+        # Consume initial spectator count broadcast
+        viewer_msg = await communicator.receive_json_from()
+        self.assertEqual(viewer_msg["type"], "viewer_count")
+
+        # Place bid
         await communicator.send_json_to({
             "action": "place_bid",
             "amount": "75.00",
@@ -63,6 +112,10 @@ class AuctionConsumerTests(TransactionTestCase):
         connected, _ = await communicator.connect()
         self.assertTrue(connected)
 
+        # Consume initial spectator count broadcast
+        viewer_msg = await communicator.receive_json_from()
+        self.assertEqual(viewer_msg["type"], "viewer_count")
+
         await communicator.send_json_to({
             "action": "place_bid",
             "amount": "20.00",
@@ -75,7 +128,6 @@ class AuctionConsumerTests(TransactionTestCase):
         await communicator.disconnect()
 
     async def test_displaced_bidder_receives_targeted_outbid_alert(self):
-        # 1. Setup bidders and auction
         bidder_a = await User.objects.acreate(username="alice", password="pw")
         bidder_b = await User.objects.acreate(username="bob", password="pw")
 
@@ -87,37 +139,40 @@ class AuctionConsumerTests(TransactionTestCase):
             status=Auction.Status.ACTIVE,
         )
 
-        # 2. Alice connects and places a $150 budget
         token_a = str(AccessToken.for_user(bidder_a))
         comm_a = WebsocketCommunicator(application, f"/ws/auctions/{auction.id}/?token={token_a}")
         connected_a, _ = await comm_a.connect()
         self.assertTrue(connected_a)
+        _ = await comm_a.receive_json_from()  # Consume initial viewer_count: 1
 
         await comm_a.send_json_to({
             "action": "place_bid",
             "max_amount": "150.00",
         })
 
-        # Alice receives private confirmation and public broadcast
         _ = await comm_a.receive_json_from()  # proxy_bid_accepted
         _ = await comm_a.receive_json_from()  # new_bid
 
-        # 3. Bob connects and outbids Alice with $250
+        # Bob connects (triggers viewer_count: 2 for both sockets)
         token_b = str(AccessToken.for_user(bidder_b))
         comm_b = WebsocketCommunicator(application, f"/ws/auctions/{auction.id}/?token={token_b}")
         connected_b, _ = await comm_b.connect()
         self.assertTrue(connected_b)
 
+        _ = await comm_b.receive_json_from()  # comm_b's initial viewer_count: 2
+        _ = await comm_a.receive_json_from()  # comm_a's updated viewer_count: 2
+
+        # Bob outbids Alice
         await comm_b.send_json_to({
             "action": "place_bid",
             "max_amount": "250.00",
         })
 
-        # Alice's socket receives the public new_bid broadcast
+        # Alice receives the public price tick
         public_event_alice = await comm_a.receive_json_from()
         self.assertEqual(public_event_alice["type"], "new_bid")
 
-        # Alice's socket receives the TARGETED outbid alert
+        # Alice receives her targeted outbid notification
         outbid_event_alice = await comm_a.receive_json_from()
         self.assertEqual(outbid_event_alice["type"], "outbid_alert")
         self.assertIn("Vintage Omega Watch", outbid_event_alice["data"]["message"])
