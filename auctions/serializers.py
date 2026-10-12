@@ -1,9 +1,18 @@
 from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Auction, Bid, ProxyBid
+from .models import Auction, Bid
 
-
+def mask_username(username: str | None) -> str:
+    """
+    Masks a username for public bid displays .
+    """
+    if not username:
+        return "***"
+    clean = username.strip()
+    if len(clean) <= 2:
+        return f"{clean[0]}***"
+    return f"{clean[0]}***{clean[-1]}"
 class AuctionSerializer(serializers.ModelSerializer):
     highest_bidder_username = serializers.CharField(
         source="highest_bidder.username", read_only=True
@@ -51,7 +60,7 @@ class AuctionSerializer(serializers.ModelSerializer):
 
 
 class BidHistorySerializer(serializers.ModelSerializer):
-    bidder_username = serializers.CharField(source="bidder.username", read_only=True)
+    bidder_username = serializers.SerializerMethodField()
 
     class Meta:
         model = Bid
@@ -62,6 +71,16 @@ class BidHistorySerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = fields
+    def get_bidder_username(self, obj) -> str:
+        request = self.context.get("request")
+        # Allow authenticated users to identify their own bids
+        if request and request.user.is_authenticated:
+            if obj.bidder_id == request.user.id:
+                return f"{obj.bidder.username} (You)"
+            if request.user.is_staff:
+                return f"{obj.bidder.username} [Staff]"
+
+        return mask_username(obj.bidder.username)
 
 
 class WonAuctionSerializer(serializers.ModelSerializer):
@@ -124,38 +143,3 @@ class UserProfileSerializer(serializers.Serializer):
     active_bids_count = serializers.IntegerField()
     won_auctions = WonAuctionSerializer(many=True)
     active_bids = ActiveBidSerializer(many=True)
-
-
-class ProxyBidSerializer(serializers.ModelSerializer):
-    auction_id = serializers.UUIDField(source="auction.id", read_only=True)
-    auction_title = serializers.CharField(source="auction.title", read_only=True)
-    current_price = serializers.DecimalField(
-        source="auction.current_price", max_digits=12, decimal_places=2, read_only=True
-    )
-    is_highest_bidder = serializers.SerializerMethodField()
-
-    class Meta:
-        model = ProxyBid
-        fields = [
-            "id",
-            "auction_id",
-            "auction_title",
-            "max_amount",
-            "current_price",
-            "is_highest_bidder",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = fields
-
-    def get_is_highest_bidder(self, obj) -> bool:
-        return obj.auction.highest_bidder_id == obj.bidder_id
-
-
-class SetProxyBidSerializer(serializers.Serializer):
-    max_amount = serializers.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        min_value=Decimal("0.01"),
-        required=True,
-    )

@@ -2,7 +2,7 @@ from decimal import Decimal, InvalidOperation
 from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from .services import execute_bid, AuctionDomainException, execute_proxy_bid
-
+from auctions.serializers import mask_username
 
 class AuctionConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
@@ -122,17 +122,17 @@ async def receive_json(self, content, **kwargs):
 
         # 2. Public broadcast (DO NOT leak caller_max_amount!)
         await self.channel_layer.group_send(
-            self.room_group_name,
-            {
-                "type": "broadcast_bid",
-                "bid_data": {
-                    "auction_id": bid_result["auction_id"],
-                    "amount": bid_result["amount"],
-                    "highest_bidder": bid_result["highest_bidder"],
-                    "bid_id": bid_result["bid_id"],
-                    "ends_at": bid_result["ends_at"],
-                    "extended": bid_result["extended"],
-                    "timestamp": bid_result["timestamp"],
-                },
-            },
-        )
+    self.room_group_name,
+    {
+        "type": "broadcast_bid",
+        "bid_data": {
+            "auction_id": bid_result["auction_id"],
+            "amount": bid_result["amount"],
+            "highest_bidder": mask_username(bid_result["highest_bidder"]),
+            "bid_id": bid_result["bid_id"],
+            "ends_at": bid_result["ends_at"],
+            "extended": bid_result["extended"],
+            "timestamp": bid_result["timestamp"],
+        },
+    },
+)

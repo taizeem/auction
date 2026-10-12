@@ -14,11 +14,17 @@ from .serializers import (
     UserProfileSerializer,
     ProxyBidSerializer,
     SetProxyBidSerializer,
+    mask_username,
 )
 from .pagination import StandardResultsSetPagination
 
 
 class AuctionListCreateView(generics.ListCreateAPIView):
+    """
+    GET  /api/auctions/
+         Query filters: ?search=..., ?ordering=..., ?min_price=..., ?max_price=..., ?page=..., ?page_size=...
+    POST /api/auctions/ -> Create listing (Authenticated users only)
+    """
     serializer_class = AuctionSerializer
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -59,12 +65,18 @@ class AuctionListCreateView(generics.ListCreateAPIView):
 
 
 class AuctionDetailView(generics.RetrieveAPIView):
+    """
+    GET /api/auctions/<uuid:pk>/ -> Retrieve full details for a single item.
+    """
     queryset = Auction.objects.select_related("highest_bidder").all()
     serializer_class = AuctionSerializer
     permission_classes = [permissions.AllowAny]
 
 
 class AuctionBidHistoryView(generics.ListAPIView):
+    """
+    GET /api/auctions/<uuid:pk>/bids/ -> Paginated bid logs (newest first, usernames masked).
+    """
     serializer_class = BidHistorySerializer
     pagination_class = StandardResultsSetPagination
     permission_classes = [permissions.AllowAny]
@@ -80,12 +92,16 @@ class AuctionBidHistoryView(generics.ListAPIView):
 
 
 class UserProfileView(APIView):
+    """
+    GET /api/auctions/profile/ -> Won auctions and ongoing active bids for the caller.
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         now = timezone.now()
         user = request.user
 
+        # 1. Closed items won by caller
         won_auctions = (
             Auction.objects.filter(
                 highest_bidder=user,
@@ -94,6 +110,7 @@ class UserProfileView(APIView):
             .order_by("-ends_at")
         )
 
+        # 2. Caller's bids on currently active listings
         active_bids = (
             Bid.objects.filter(
                 bidder=user,
@@ -114,13 +131,13 @@ class UserProfileView(APIView):
             },
             context={"request": request},
         )
-        return Response(serializer.data)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class AuctionProxyBidView(APIView):
     """
-    GET  /api/auctions/<uuid:pk>/proxy-bid/ -> View caller's max budget for this item.
-    POST /api/auctions/<uuid:pk>/proxy-bid/ -> Create or raise caller's max proxy budget.
+    GET  /api/auctions/<uuid:pk>/proxy-bid/ -> View caller's private maximum budget.
+    POST /api/auctions/<uuid:pk>/proxy-bid/ -> Set or raise private maximum budget.
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -154,7 +171,7 @@ class AuctionProxyBidView(APIView):
         except AuctionDomainException as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Broadcast public price update to connected WebSocket clients
+        # Broadcast public price update to connected WebSocket screens
         channel_layer = get_channel_layer()
         if channel_layer:
             async_to_sync(channel_layer.group_send)(
@@ -164,7 +181,7 @@ class AuctionProxyBidView(APIView):
                     "bid_data": {
                         "auction_id": bid_result["auction_id"],
                         "amount": bid_result["amount"],
-                        "highest_bidder": bid_result["highest_bidder"],
+                        "highest_bidder": mask_username(bid_result["highest_bidder"]),
                         "bid_id": bid_result["bid_id"],
                         "ends_at": bid_result["ends_at"],
                         "extended": bid_result["extended"],
