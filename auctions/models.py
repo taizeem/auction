@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+from django.
 
 
 class Auction(models.Model):
@@ -250,3 +251,108 @@ class DepositHold(models.Model):
 
     def __str__(self):
         return f"Hold ${self.amount} for {self.user.username} on {self.auction.title} [{self.status}]"
+
+
+class LedgerAccount(models.Model):
+    class AccountType(models.TextChoices):
+        ASSET = "ASSET", "Asset"
+        LIABILITY = "LIABILITY", "Liability"
+        REVENUE = "REVENUE", "Revenue"
+        EXPENSE = "EXPENSE", "Expense"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=128)
+    account_type = models.CharField(max_length=16, choices=AccountType.choices)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="ledger_accounts",
+        help_text="Optional link to a specific user (e.g. for user-specific seller payable accounts).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        user_suffix = f" [{self.user.username}]" if self.user else ""
+        return f"{self.code} - {self.name}{user_suffix}"
+
+    @property
+    def current_balance(self) -> Decimal:
+        """Computes current balance from immutable entries."""
+        totals = self.entries.aggregate(
+            debits=models.Sum("amount", filter=models.Q(entry_type=LedgerEntry.EntryType.DEBIT)),
+            credits=models.Sum("amount", filter=models.Q(entry_type=LedgerEntry.EntryType.CREDIT)),
+        )
+        debits = totals["debits"] or Decimal("0.00")
+        credits = totals["credits"] or Decimal("0.00")
+
+        if self.account_type in (self.AccountType.ASSET, self.AccountType.EXPENSE):
+            return debits - credits
+        else:
+            return credits - debits
+
+
+class LedgerTransaction(models.Model):
+    class TransactionType(models.TextChoices):
+        ORDER_SETTLEMENT = "ORDER_SETTLEMENT", "Order Settlement"
+        SELLER_PAYOUT = "SELLER_PAYOUT", "Seller Payout"
+        DEPOSIT_FORFEITURE = "DEPOSIT_FORFEITURE", "Deposit Forfeiture"
+        REFUND = "REFUND", "Refund"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    transaction_type = models.CharField(max_length=32, choices=TransactionType.choices)
+    reference_id = models.CharField(max_length=128, db_index=True)
+    description = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Txn {self.id} [{self.transaction_type}] - Ref: {self.reference_id}"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding and LedgerTransaction.objects.filter(pk=self.pk).exists():
+            raise ValidationError("LedgerTransaction records are strictly immutable and cannot be updated.")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("LedgerTransaction records cannot be deleted.")
+
+
+class LedgerEntry(models.Model):
+    class EntryType(models.TextChoices):
+        DEBIT = "DEBIT", "Debit"
+        CREDIT = "CREDIT", "Credit"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    transaction = models.ForeignKey(
+        LedgerTransaction, on_delete=models.PROTECT, related_name="entries"
+    )
+    account = models.ForeignKey(
+        LedgerAccount, on_delete=models.PROTECT, related_name="entries"
+    )
+    entry_type = models.CharField(max_length=8, choices=EntryType.choices)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["account", "entry_type"]),
+            models.Index(fields=["transaction", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.entry_type} ${self.amount} -> {self.account.code}"
+
+    def clean(self):
+        if self.amount <= Decimal("0.00"):
+            raise ValidationError("LedgerEntry amount must be strictly positive.")
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding and LedgerEntry.objects.filter(pk=self.pk).exists():
+            raise ValidationError("LedgerEntry records are strictly immutable and cannot be modified.")
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("LedgerEntry records cannot be deleted.")
