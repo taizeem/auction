@@ -38,6 +38,16 @@ def execute_bid(auction_id: str, user, amount: Decimal) -> dict:
     except Auction.DoesNotExist:
         raise AuctionDomainException("Auction not found.")
 
+    if auction.seller_id and auction.seller_id == user.id:
+        raise AuctionDomainException("Sellers are not permitted to bid on their own auctions.")
+
+    now = timezone.now()
+    if auction.status != Auction.Status.ACTIVE or auction.is_expired:
+        if auction.status == Auction.Status.ACTIVE:
+            auction.status = Auction.Status.CLOSED
+            auction.save(update_fields=["status", "updated_at"])
+        raise AuctionDomainException("This auction has expired and is no longer accepting bids.")
+
     now = timezone.now()
 
     if auction.status != Auction.Status.ACTIVE or auction.is_expired:
@@ -92,6 +102,12 @@ def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
     except Auction.DoesNotExist:
         raise AuctionDomainException("Auction not found.")
 
+    
+    if auction.seller_id and auction.seller_id == user.id:
+        raise AuctionDomainException("Sellers are not permitted to bid on their own auctions.")
+
+    previous_leader = auction.highest_bidder
+    now = timezone.now()
     previous_leader = auction.highest_bidder
     now = timezone.now()
 
@@ -259,6 +275,12 @@ def execute_buy_it_now(auction_id: str, user) -> dict:
     if auction.status != Auction.Status.ACTIVE or auction.is_expired:
         raise AuctionDomainException("This auction is not open for instant purchase.")
 
+    if auction.seller_id and auction.seller_id == user.id:
+        raise AuctionDomainException("Sellers cannot buy their own listings.")
+
+    if auction.status != Auction.Status.ACTIVE or auction.is_expired:
+        raise AuctionDomainException("This auction is not open for instant purchase.")
+    
     if not auction.buy_it_now_price:
         raise AuctionDomainException("Buy It Now is not available for this auction.")
 
@@ -486,4 +508,34 @@ def respond_to_second_chance_offer(offer_id: str, user, accept: bool) -> dict:
         "order_id": str(new_order.id),
         "amount": str(new_order.amount),
         "payment_due_at": new_order.payment_due_at.isoformat(),
+    }
+@transaction.atomic
+def cancel_auction(auction_id: str, user) -> dict:
+    """
+    Cancels an auction atomically. Sellers may only cancel if zero bids have been placed.
+    """
+    try:
+        auction = Auction.objects.select_for_update().get(id=auction_id)
+    except Auction.DoesNotExist:
+        raise AuctionDomainException("Auction not found.")
+
+    if auction.seller and auction.seller != user and not user.is_staff:
+        raise AuctionDomainException("You do not have permission to cancel this auction.")
+
+    if auction.status != Auction.Status.ACTIVE:
+        raise AuctionDomainException(f"Cannot cancel auction in '{auction.status}' status.")
+
+    # Strictly reject cancellation if any bids exist
+    if Bid.objects.filter(auction=auction).exists():
+        raise AuctionDomainException(
+            "Cannot cancel an auction after bids have already been placed."
+        )
+
+    auction.status = Auction.Status.CANCELLED
+    auction.save(update_fields=["status", "updated_at"])
+
+    return {
+        "auction_id": str(auction.id),
+        "title": auction.title,
+        "status": auction.status,
     }

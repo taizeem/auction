@@ -14,6 +14,9 @@ def mask_username(username: str | None) -> str:
 
 
 class AuctionSerializer(serializers.ModelSerializer):
+    seller_username = serializers.CharField(
+        source="seller.username", read_only=True
+    )
     highest_bidder_username = serializers.CharField(
         source="highest_bidder.username", read_only=True
     )
@@ -25,6 +28,8 @@ class AuctionSerializer(serializers.ModelSerializer):
         model = Auction
         fields = [
             "id",
+            "seller",
+            "seller_username",
             "title",
             "description",
             "starting_price",
@@ -43,6 +48,7 @@ class AuctionSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id",
+            "seller",
             "current_price",
             "highest_bidder",
             "status",
@@ -50,7 +56,7 @@ class AuctionSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         extra_kwargs = {
-            "reserve_price": {"write_only": True},  # Keep secret from public queries
+            "reserve_price": {"write_only": True},
         }
 
     def validate_starting_price(self, value: Decimal) -> Decimal:
@@ -64,9 +70,27 @@ class AuctionSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        starting_price = attrs.get("starting_price")
-        reserve_price = attrs.get("reserve_price")
-        buy_it_now_price = attrs.get("buy_it_now_price")
+        # 1. Edit restrictions when updating an existing listing
+        if self.instance is not None:
+            has_bids = self.instance.bids.exists()
+            if has_bids:
+                locked_fields = ["starting_price", "reserve_price", "buy_it_now_price", "ends_at"]
+                for field in locked_fields:
+                    if field in attrs and attrs[field] != getattr(self.instance, field):
+                        raise serializers.ValidationError({
+                            field: f"Cannot modify '{field}' once bids have been placed."
+                        })
+
+        # 2. General price boundary validations
+        starting_price = attrs.get("starting_price") or (
+            self.instance.starting_price if self.instance else None
+        )
+        reserve_price = attrs.get("reserve_price") or (
+            self.instance.reserve_price if self.instance else None
+        )
+        buy_it_now_price = attrs.get("buy_it_now_price") or (
+            self.instance.buy_it_now_price if self.instance else None
+        )
 
         if reserve_price and starting_price and reserve_price < starting_price:
             raise serializers.ValidationError({
@@ -88,7 +112,6 @@ class AuctionSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data["current_price"] = validated_data["starting_price"]
         return super().create(validated_data)
-
 
 class BidHistorySerializer(serializers.ModelSerializer):
     bidder_username = serializers.SerializerMethodField()

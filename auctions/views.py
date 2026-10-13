@@ -7,7 +7,13 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import get_object_or_404
 from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer
-from .services import execute_proxy_bid, AuctionDomainException, execute_buy_it_now, settle_order_payment, respond_to_second_chance_offer
+from .services import (
+    execute_proxy_bid, 
+    AuctionDomainException, 
+    execute_buy_it_now, 
+    settle_order_payment, 
+    respond_to_second_chance_offer, 
+    cancel_auction)
 from .serializers import (
     AuctionSerializer,
     BidHistorySerializer,
@@ -22,6 +28,14 @@ from .serializers import (
 )
 from .pagination import StandardResultsSetPagination
 
+class IsSellerOrReadOnly(permissions.BasePermission):
+    """
+    Allow read-only requests to anyone; write permissions to the seller or staff.
+    """
+    def has_object_permission(self, request, view, obj):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return obj.seller == request.user or request.user.is_staff
 
 class AuctionListCreateView(generics.ListCreateAPIView):
     """
@@ -41,13 +55,16 @@ class AuctionListCreateView(generics.ListCreateAPIView):
             return [permissions.IsAuthenticated()]
         return [permissions.AllowAny()]
 
+    def perform_create(self, serializer):
+        serializer.save(seller=self.request.user)
+
     def get_queryset(self):
         queryset = (
             Auction.objects.filter(
                 status=Auction.Status.ACTIVE,
                 ends_at__gt=timezone.now(),
             )
-            .select_related("highest_bidder")
+            .select_related("highest_bidder", "seller")
         )
 
         min_price = self.request.query_params.get("min_price")
@@ -72,9 +89,38 @@ class AuctionDetailView(generics.RetrieveAPIView):
     """
     GET /api/auctions/<uuid:pk>/ -> Retrieve full details for a single item.
     """
-    queryset = Auction.objects.select_related("highest_bidder").all()
+    queryset = Auction.objects.select_related("highest_bidder", "seller").all()
     serializer_class = AuctionSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [IsSellerOrReadOnly]
+
+class AuctionCancelView(APIView):
+    """
+    POST /api/auctions/<uuid:pk>/cancel/ -> Cancel listing (Allowed only if zero bids exist).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            result = cancel_auction(auction_id=str(pk), user=request.user)
+        except AuctionDomainException as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Broadcast cancellation event across WebSockets
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            async_to_sync(channel_layer.group_send)(
+                f"auction_{pk}",
+                {
+                    "type": "broadcast_auction_closed",
+                    "data": {
+                        "auction_id": result["auction_id"],
+                        "status": result["status"],
+                        "reason": "cancelled",
+                    },
+                },
+            )
+
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class AuctionBidHistoryView(generics.ListAPIView):
