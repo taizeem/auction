@@ -345,3 +345,83 @@ class OrderSettlementTests(APITestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.EXPIRED)
+
+class SellerRestrictionsTests(APITestCase):
+    def setUp(self):
+        self.seller = User.objects.create_user(username="item_seller", password="pw")
+        self.buyer = User.objects.create_user(username="honest_buyer", password="pw")
+        self.other_user = User.objects.create_user(username="stranger", password="pw")
+
+        self.auction = Auction.objects.create(
+            seller=self.seller,
+            title="Vintage Turntable",
+            description="Mint condition audio equipment.",
+            starting_price=Decimal("100.00"),
+            current_price=Decimal("100.00"),
+            ends_at=timezone.now() + timedelta(days=3),
+            status=Auction.Status.ACTIVE,
+        )
+
+    def test_seller_cannot_bid_on_own_auction_anti_shill(self):
+        self.client.force_authenticate(user=self.seller)
+        url = reverse("auction_proxy_bid", kwargs={"pk": self.auction.id})
+
+        response = self.client.post(url, {"max_amount": "200.00"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("own auctions", response.data["detail"])
+
+    def test_seller_can_cancel_auction_with_zero_bids(self):
+        self.client.force_authenticate(user=self.seller)
+        url = reverse("auction_cancel", kwargs={"pk": self.auction.id})
+
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], Auction.Status.CANCELLED)
+
+        self.auction.refresh_from_db()
+        self.assertEqual(self.auction.status, Auction.Status.CANCELLED)
+
+    def test_non_seller_cannot_cancel_auction(self):
+        self.client.force_authenticate(user=self.other_user)
+        url = reverse("auction_cancel", kwargs={"pk": self.auction.id})
+
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("do not have permission", response.data["detail"])
+
+    def test_cancellation_rejected_after_bids_are_placed(self):
+        # Buyer places a legitimate bid
+        from auctions.services import execute_proxy_bid
+        execute_proxy_bid(str(self.auction.id), self.buyer, Decimal("150.00"))
+
+        # Seller attempts to cancel
+        self.client.force_authenticate(user=self.seller)
+        url = reverse("auction_cancel", kwargs={"pk": self.auction.id})
+
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("after bids have already been placed", response.data["detail"])
+
+    def test_seller_can_edit_description_even_after_bids_exist(self):
+        from auctions.services import execute_proxy_bid
+        execute_proxy_bid(str(self.auction.id), self.buyer, Decimal("150.00"))
+
+        self.client.force_authenticate(user=self.seller)
+        url = reverse("auction_detail", kwargs={"pk": self.auction.id})
+
+        patch_data = {"description": "Updated notes: includes original power cable."}
+        response = self.client.patch(url, patch_data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["description"], patch_data["description"])
+
+    def test_seller_cannot_edit_price_terms_after_bids_exist(self):
+        from auctions.services import execute_proxy_bid
+        execute_proxy_bid(str(self.auction.id), self.buyer, Decimal("150.00"))
+
+        self.client.force_authenticate(user=self.seller)
+        url = reverse("auction_detail", kwargs={"pk": self.auction.id})
+
+        patch_data = {"starting_price": "250.00"}
+        response = self.client.patch(url, patch_data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("starting_price", response.data)
