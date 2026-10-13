@@ -5,8 +5,8 @@ from django.contrib.auth import get_user_model
 from django.db import connections
 from django.test import TransactionTestCase
 from django.utils import timezone
-from auctions.models import Auction, Bid, ProxyBid
-from auctions.services import execute_bid, AuctionDomainException, execute_proxy_bid
+from auctions.models import Auction, Bid, ProxyBid, SecondChanceOffer
+from auctions.services import execute_bid, AuctionDomainException, execute_proxy_bid, process_defaulted_order_and_second_chance, respond_to_second_chance_offer
 
 User = get_user_model()
 
@@ -205,3 +205,65 @@ class ProxyBiddingEngineTests(TransactionTestCase):
         
         user_proxy = ProxyBid.objects.get(auction=self.auction, bidder=self.alice)
         self.assertEqual(user_proxy.max_amount, Decimal("400.00"))
+        
+class SecondChanceOfferTests(TransactionTestCase):
+    def setUp(self):
+        self.alice = User.objects.create_user(username="winner_alice", password="pw")
+        self.bob = User.objects.create_user(username="runnerup_bob", password="pw")
+
+        self.auction = Auction.objects.create(
+            title="Collectible Mechanical Keyboard",
+            starting_price=Decimal("100.00"),
+            current_price=Decimal("100.00"),
+            ends_at=timezone.now() + timedelta(hours=2),
+            status=Auction.Status.ACTIVE,
+        )
+
+        # Alice bids $300, Bob bids $250 -> Alice wins at $255.00
+        execute_proxy_bid(str(self.auction.id), self.alice, Decimal("300.00"))
+        execute_proxy_bid(str(self.auction.id), self.bob, Decimal("250.00"))
+
+        # Close auction -> Creates order for Alice
+        close_res = close_auction(str(self.auction.id))
+        self.order = Order.objects.get(id=close_res["order_id"])
+
+    def test_defaulted_order_creates_offer_for_runner_up(self):
+        result = process_defaulted_order_and_second_chance(str(self.order.id))
+
+        self.assertEqual(result["action"], "offer_created")
+        self.assertEqual(result["recipient"], "runnerup_bob")
+        self.assertEqual(result["amount"], "250.00")
+
+        # Verify database state
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.EXPIRED)
+
+        offer = SecondChanceOffer.objects.get(id=result["offer_id"])
+        self.assertEqual(offer.recipient, self.bob)
+        self.assertEqual(offer.amount, Decimal("250.00"))
+        self.assertEqual(offer.status, SecondChanceOffer.Status.PENDING)
+
+    def test_runner_up_accepting_offer_creates_new_order(self):
+        result = process_defaulted_order_and_second_chance(str(self.order.id))
+        offer_id = result["offer_id"]
+
+        # Bob accepts
+        accept_res = respond_to_second_chance_offer(offer_id, self.bob, accept=True)
+        self.assertEqual(accept_res["status"], SecondChanceOffer.Status.ACCEPTED)
+        self.assertIsNotNone(accept_res["order_id"])
+
+        new_order = Order.objects.get(id=accept_res["order_id"])
+        self.assertEqual(new_order.buyer, self.bob)
+        self.assertEqual(new_order.amount, Decimal("250.00"))
+        self.assertEqual(new_order.status, Order.Status.PENDING_PAYMENT)
+
+    def test_runner_up_declining_offer_marks_auction_unsold(self):
+        result = process_defaulted_order_and_second_chance(str(self.order.id))
+        offer_id = result["offer_id"]
+
+        # Bob declines
+        decline_res = respond_to_second_chance_offer(offer_id, self.bob, accept=False)
+        self.assertEqual(decline_res["status"], SecondChanceOffer.Status.DECLINED)
+
+        self.auction.refresh_from_db()
+        self.assertEqual(self.auction.status, Auction.Status.UNSOLD)

@@ -40,12 +40,19 @@ def check_and_close_expired_auctions():
 @shared_task
 def expire_overdue_orders():
     """
-    Marks orders as EXPIRED if the buyer failed to pay within the deadline window.
+    Scans for expired orders and triggers second-chance offers.
     """
     now = timezone.now()
-    overdue_orders = Order.objects.filter(
-        status=Order.Status.PENDING_PAYMENT,
-        payment_due_at__lte=now,
+    overdue_orders = list(
+        Order.objects.filter(
+            status=Order.Status.PENDING_PAYMENT,
+            payment_due_at__lte=now,
+        ).values_list("id", flat=True)
     )
-    count = overdue_orders.update(status=Order.Status.EXPIRED)
-    return f"Expired {count} overdue order(s)."
+
+    processed = 0
+    for order_id in overdue_orders:
+        process_defaulted_order_and_second_chance(str(order_id))
+        processed += 1
+
+    return f"Processed {processed} overdue order(s) for second-chance offers."
