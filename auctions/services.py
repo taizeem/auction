@@ -20,6 +20,7 @@ ANTI_SNIPE_THRESHOLD_SECONDS = 120
 AUTO_EXTEND_SECONDS = 120
 PAYMENT_WINDOW_HOURS = 24
 SECOND_CHANCE_WINDOW_HOURS = 24
+PLATFORM_COMMISSION_RATE = Decimal("0.05")
 
 
 def get_minimum_increment(current_price: Decimal) -> Decimal:
@@ -724,3 +725,201 @@ def capture_deposit_hold(user, auction: Auction) -> None:
 
     hold.status = DepositHold.Status.CAPTURED
     hold.save(update_fields=["status", "updated_at"])
+
+
+
+
+def get_or_create_system_accounts():
+    """Retrieves or provisions standard chart of accounts."""
+    clearing_cash, _ = LedgerAccount.objects.get_or_create(
+        code="1000_CLEARING_CASH",
+        defaults={
+            "name": "Platform Clearing Cash / Stripe",
+            "account_type": LedgerAccount.AccountType.ASSET,
+        },
+    )
+    user_wallets, _ = LedgerAccount.objects.get_or_create(
+        code="2100_USER_WALLET",
+        defaults={
+            "name": "User Wallet Liabilities",
+            "account_type": LedgerAccount.AccountType.LIABILITY,
+        },
+    )
+    commission_rev, _ = LedgerAccount.objects.get_or_create(
+        code="4000_PLATFORM_COMMISSION",
+        defaults={
+            "name": "Marketplace Commission Revenue",
+            "account_type": LedgerAccount.AccountType.REVENUE,
+        },
+    )
+    forfeiture_rev, _ = LedgerAccount.objects.get_or_create(
+        code="4100_FORFEITURE_PENALTY",
+        defaults={
+            "name": "Defaulted Hold Forfeiture Revenue",
+            "account_type": LedgerAccount.AccountType.REVENUE,
+        },
+    )
+    return clearing_cash, user_wallets, commission_rev, forfeiture_rev
+
+
+def get_or_create_seller_payable_account(seller) -> LedgerAccount:
+    """Returns or creates a designated liability account for a specific seller."""
+    account, _ = LedgerAccount.objects.get_or_create(
+        code=f"2000_SELLER_{seller.id}",
+        defaults={
+            "name": f"Payable to {seller.username}",
+            "account_type": LedgerAccount.AccountType.LIABILITY,
+            "user": seller,
+        },
+    )
+    return account
+
+
+@transaction.atomic
+def record_double_entry_transaction(
+    transaction_type: str,
+    reference_id: str,
+    description: str,
+    entry_specs: list[dict],
+) -> LedgerTransaction:
+    """
+    Records an atomic financial transaction verifying mathematical balance.
+    Each spec: {"account": LedgerAccount, "entry_type": "DEBIT"|"CREDIT", "amount": Decimal}
+    """
+    total_debits = Decimal("0.00")
+    total_credits = Decimal("0.00")
+
+    for spec in entry_specs:
+        amount = Decimal(str(spec["amount"]))
+        if spec["entry_type"] == LedgerEntry.EntryType.DEBIT:
+            total_debits += amount
+        elif spec["entry_type"] == LedgerEntry.EntryType.CREDIT:
+            total_credits += amount
+
+    # Enforce accounting equation: Debits must balance Credits
+    if total_debits != total_credits:
+        raise AuctionDomainException(
+            f"Ledger imbalance detected: Total debits (${total_debits}) "
+            f"do not equal total credits (${total_credits})."
+        )
+
+    txn = LedgerTransaction.objects.create(
+        transaction_type=transaction_type,
+        reference_id=str(reference_id),
+        description=description,
+    )
+
+    for spec in entry_specs:
+        LedgerEntry.objects.create(
+            transaction=txn,
+            account=spec["account"],
+            entry_type=spec["entry_type"],
+            amount=Decimal(str(spec["amount"])),
+        )
+
+    return txn
+
+
+@transaction.atomic
+def record_order_settlement_ledger(order: Order) -> LedgerTransaction:
+    """
+    Splits gross order settlement into:
+    - Debit Clearing Cash (Asset) for gross amount
+    - Credit Platform Commission (Revenue) for 5%
+    - Credit Seller Payable (Liability) for net payout
+    """
+    clearing_cash, _, commission_rev, _ = get_or_create_system_accounts()
+    seller_account = get_or_create_seller_payable_account(order.auction.seller)
+
+    gross_amount = order.amount
+    commission_fee = (gross_amount * PLATFORM_COMMISSION_RATE).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    seller_net = gross_amount - commission_fee
+
+    entries = [
+        {
+            "account": clearing_cash,
+            "entry_type": LedgerEntry.EntryType.DEBIT,
+            "amount": gross_amount,
+        },
+        {
+            "account": commission_rev,
+            "entry_type": LedgerEntry.EntryType.CREDIT,
+            "amount": commission_fee,
+        },
+        {
+            "account": seller_account,
+            "entry_type": LedgerEntry.EntryType.CREDIT,
+            "amount": seller_net,
+        },
+    ]
+
+    return record_double_entry_transaction(
+        transaction_type=LedgerTransaction.TransactionType.ORDER_SETTLEMENT,
+        reference_id=str(order.id),
+        description=f"Order settlement for Order #{order.id} ({order.auction.title})",
+        entry_specs=entries,
+    )
+
+
+@transaction.atomic
+def record_deposit_forfeiture_ledger(user, auction, hold_amount: Decimal) -> LedgerTransaction:
+    """
+    Transfers defaulted deposit hold from user liability to platform forfeiture revenue.
+    """
+    _, user_wallets, _, forfeiture_rev = get_or_create_system_accounts()
+
+    entries = [
+        {
+            "account": user_wallets,
+            "entry_type": LedgerEntry.EntryType.DEBIT,
+            "amount": hold_amount,
+        },
+        {
+            "account": forfeiture_rev,
+            "entry_type": LedgerEntry.EntryType.CREDIT,
+            "amount": hold_amount,
+        },
+    ]
+
+    return record_double_entry_transaction(
+        transaction_type=LedgerTransaction.TransactionType.DEPOSIT_FORFEITURE,
+        reference_id=f"forfeit_{auction.id}_{user.id}",
+        description=f"Forfeited deposit hold for {user.username} on auction #{auction.id}",
+        entry_specs=entries,
+    )
+
+
+@transaction.atomic
+def record_seller_payout_ledger(seller, amount: Decimal, payout_ref: str) -> LedgerTransaction:
+    """
+    Reduces seller payable liability and decreases platform clearing cash upon payout.
+    """
+    clearing_cash, _, _, _ = get_or_create_system_accounts()
+    seller_account = get_or_create_seller_payable_account(seller)
+
+    if seller_account.current_balance < amount:
+        raise AuctionDomainException(
+            f"Insufficient seller balance: Available payable balance is ${seller_account.current_balance}."
+        )
+
+    entries = [
+        {
+            "account": seller_account,
+            "entry_type": LedgerEntry.EntryType.DEBIT,
+            "amount": amount,
+        },
+        {
+            "account": clearing_cash,
+            "entry_type": LedgerEntry.EntryType.CREDIT,
+            "amount": amount,
+        },
+    ]
+
+    return record_double_entry_transaction(
+        transaction_type=LedgerTransaction.TransactionType.SELLER_PAYOUT,
+        reference_id=payout_ref,
+        description=f"Disbursed payout to seller {seller.username}",
+        entry_specs=entries,
+    )
