@@ -129,7 +129,7 @@ def execute_proxy_bid(
     auction.save(update_fields=["current_price", "highest_bidder", "ends_at", "updated_at"])
 
     # 11. Record the public bid entry
-    Bid.objects.create(
+    bid = Bid.objects.create(
         auction=auction,
         bidder=auction.highest_bidder,
         amount=auction.current_price,
@@ -137,11 +137,12 @@ def execute_proxy_bid(
 
     # 12. If previous leader was completely displaced, release their deposit hold
     if previous_leader and auction.highest_bidder != previous_leader:
-        prev_proxy = ProxyBid.objects.filter(auction=auction, bidder=previous_leader).first()
+        prev_proxy = ProxyBid.objects.filter(
+            auction=auction, bidder=previous_leader
+        ).first()
         if prev_proxy and prev_proxy.max_amount <= auction.current_price:
             release_deposit_hold(previous_leader, auction)
 
-        # Send private WebSocket outbid alert to displaced bidder
         channel_layer = get_channel_layer()
         if channel_layer:
             async_to_sync(channel_layer.group_send)(
@@ -158,8 +159,11 @@ def execute_proxy_bid(
             )
 
     return {
+        "bid_id": str(bid.id),  # <-- Required by views.py line 238
         "auction_id": str(auction.id),
         "current_price": str(auction.current_price),
+        "amount": str(auction.current_price),
+        "final_price": str(auction.current_price),
         "highest_bidder": auction.highest_bidder.username,
         "your_max_budget": str(target_budget),
         "ends_at": auction.ends_at.isoformat(),
@@ -363,7 +367,8 @@ def execute_buy_it_now(auction_id: str, user) -> dict:
         "auction_id": str(auction.id),
         "order_id": str(order.id),
         "amount": str(order.amount),
-        "winner": user.username,  # Satisfies views expecting 'winner'
+        "final_price": str(order.amount),  
+        "winner": user.username,            
         "status": auction.status,
     }
 

@@ -291,13 +291,13 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
             "count": event["count"],
         })
     async def targeted_outbid_alert(self, event):
-        """Dispatches private outbid notification to displaced bidder."""
+        """Pushes targeted outbid notification to the displaced user's socket."""
         await self.send_json({
             "type": "targeted_outbid_alert",
             "data": event.get("data") or {},
         })
     async def second_chance_notification(self, event):
-        """Dispatches private second-chance offer notification to runner-up."""
+        """Pushes second-chance offer notification to the runner-up's socket."""
         await self.send_json({
             "type": "second_chance_notification",
             "data": event.get("data") or {},

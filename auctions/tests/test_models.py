@@ -45,7 +45,7 @@ class AuctionModelTests(TestCase):
             buyer=self.user,
             amount=Decimal("10.00"),
             status=Order.Status.PENDING_PAYMENT,
-            payment_due_at=timezone.now() + timedelta(hours=24),
+            payment_due_at=timezone.now() + timedelta(hours=24),  # Satisfies NOT NULL constraint
         )
         self.assertFalse(order.is_payment_overdue)
 

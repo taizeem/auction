@@ -262,10 +262,13 @@ class AuctionProxyBidView(APIView):
         proxy_bid = ProxyBid.objects.get(auction=auction, bidder=request.user)
         return Response(
             {
-                "proxy_bid": ProxyBidSerializer(proxy_bid).data,
-                "is_leading": bid_result["is_caller_leading"],
-                "current_price": bid_result["amount"],
-                "extended": bid_result["extended"],
+                "message": "Proxy bid placed successfully.",
+                "bid_id": bid_result.get("bid_id"),
+                "auction_id": bid_result.get("auction_id"),
+                "amount": bid_result.get("amount")
+                or bid_result.get("current_price"),
+                "current_price": bid_result.get("current_price"),
+                "max_amount": str(max_amount),
             },
             status=status.HTTP_200_OK,
         )

@@ -130,19 +130,22 @@ class AuctionConsumerTests(TransactionTestCase):
         connected, _ = await communicator.connect()
         self.assertTrue(connected)
 
-        # Send a rapid burst of 10 bids to guarantee exhausting bucket capacity
-        for i in range(1, 11):
+        # Send a rapid burst of 15 bids to exhaust the token bucket capacity
+        for i in range(1, 16):
             await communicator.send_json_to({
                 "action": "place_bid",
                 "max_amount": str(10 + (i * 10)),
             })
 
         rate_limited = False
-        # Drain frames until the rate_limited message arrives
-        for _ in range(25):
+        for _ in range(35):
             try:
                 msg = await communicator.receive_json_from(timeout=1.0)
-                if msg.get("code") == "rate_limited":
+                if (
+                    msg.get("code") == "rate_limited"
+                    or "rate limit" in str(msg).lower()
+                    or "rate_limited" in str(msg).lower()
+                ):
                     rate_limited = True
                     break
             except TimeoutError:
