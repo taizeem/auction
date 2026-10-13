@@ -118,6 +118,8 @@ class ProxyBid(models.Model):
         return f"{self.bidder.username} - {self.auction.title}: ${self.max_amount}"
 
 
+
+
 class Order(models.Model):
     class Status(models.TextChoices):
         PENDING_PAYMENT = "PENDING", "Pending Payment"
@@ -126,8 +128,9 @@ class Order(models.Model):
         CANCELLED = "CANCELLED", "Cancelled"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    auction = models.OneToOneField(
-        Auction, on_delete=models.CASCADE, related_name="order"
+    
+    auction = models.ForeignKey(
+        Auction, on_delete=models.CASCADE, related_name="orders"
     )
     buyer = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="orders"
@@ -136,9 +139,7 @@ class Order(models.Model):
     status = models.CharField(
         max_length=10, choices=Status.choices, default=Status.PENDING_PAYMENT
     )
-    payment_due_at = models.DateTimeField(
-        help_text="Deadline before the order expires and winner defaults."
-    )
+    payment_due_at = models.DateTimeField()
     paid_at = models.DateTimeField(null=True, blank=True)
     transaction_id = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -156,3 +157,45 @@ class Order(models.Model):
     @property
     def is_payment_overdue(self) -> bool:
         return timezone.now() > self.payment_due_at
+
+
+class SecondChanceOffer(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        ACCEPTED = "ACCEPTED", "Accepted"
+        DECLINED = "DECLINED", "Declined"
+        EXPIRED = "EXPIRED", "Expired"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    auction = models.ForeignKey(
+        Auction, on_delete=models.CASCADE, related_name="second_chance_offers"
+    )
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="second_chance_offers"
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(
+        max_length=10, choices=Status.choices, default=Status.PENDING
+    )
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["status", "expires_at"]),
+            models.Index(fields=["recipient", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["auction", "recipient"],
+                name="unique_auction_recipient_offer",
+            )
+        ]
+
+    def __str__(self):
+        return f"Offer {self.id} - {self.recipient.username} on {self.auction.title}: ${self.amount}"
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() > self.expires_at
