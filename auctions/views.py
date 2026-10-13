@@ -6,8 +6,8 @@ from rest_framework import generics, permissions, filters, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import get_object_or_404
-from .models import Auction, Bid, ProxyBid, Order
-from .services import execute_proxy_bid, AuctionDomainException, execute_buy_it_now, settle_order_payment
+from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer
+from .services import execute_proxy_bid, AuctionDomainException, execute_buy_it_now, settle_order_payment, respond_to_second_chance_offer
 from .serializers import (
     AuctionSerializer,
     BidHistorySerializer,
@@ -17,6 +17,8 @@ from .serializers import (
     mask_username,
     OrderSerializer,
     PaymentSubmitSerializer,
+    SecondChanceOfferSerializer,
+    SecondChanceActionSerializer
 )
 from .pagination import StandardResultsSetPagination
 
@@ -279,6 +281,43 @@ class OrderPayView(APIView):
                 order_id=str(pk),
                 user=request.user,
                 transaction_id=txn_id,
+            )
+        except AuctionDomainException as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result, status=status.HTTP_200_OK)
+
+class SecondChanceOfferListView(generics.ListAPIView):
+    """
+    GET /api/second-chance/ -> List all active second-chance offers for caller.
+    """
+    serializer_class = SecondChanceOfferSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            SecondChanceOffer.objects.filter(recipient=self.request.user)
+            .select_related("auction")
+            .order_by("-created_at")
+        )
+
+
+class SecondChanceOfferRespondView(APIView):
+    """
+    POST /api/second-chance/<uuid:pk>/respond/ -> {"accept": true / false}
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        serializer = SecondChanceActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        accept = serializer.validated_data["accept"]
+
+        try:
+            result = respond_to_second_chance_offer(
+                offer_id=str(pk),
+                user=request.user,
+                accept=accept,
             )
         except AuctionDomainException as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)

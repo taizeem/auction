@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Auction, Bid, ProxyBid, Order
+from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer
 
 
 def mask_username(username: str | None) -> str:
@@ -238,3 +238,24 @@ class PaymentSubmitSerializer(serializers.Serializer):
     transaction_id = serializers.CharField(
         max_length=255, required=False, default="txn_simulated_success"
     )
+
+class SecondChanceOfferSerializer(serializers.ModelSerializer):
+    auction_id = serializers.UUIDField(source="auction.id", read_only=True)
+    auction_title = serializers.CharField(source="auction.title", read_only=True)
+
+    class Meta:
+        model = SecondChanceOffer
+        fields = [
+            "id",
+            "auction_id",
+            "auction_title",
+            "amount",
+            "status",
+            "expires_at",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class SecondChanceActionSerializer(serializers.Serializer):
+    accept = serializers.BooleanField(required=True)

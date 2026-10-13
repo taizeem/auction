@@ -297,3 +297,11 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
             "type": "viewer_count",
             "count": event["count"],
         })
+    async def second_chance_notification(self, event):
+        """
+        Pushed to user_<id> when a second-chance offer is issued.
+        """
+        await self.send_json({
+            "type": "second_chance_offer",
+            "data": event["data"],
+        })

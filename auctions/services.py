@@ -2,7 +2,9 @@ from decimal import Decimal
 from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
-from .models import Auction, Bid, ProxyBid, Order
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer
 
 
 class AuctionDomainException(Exception):
@@ -13,6 +15,7 @@ class AuctionDomainException(Exception):
 ANTI_SNIPE_THRESHOLD_SECONDS = 120
 AUTO_EXTEND_SECONDS = 120
 PAYMENT_WINDOW_HOURS = 24
+SECOND_CHANCE_WINDOW_HOURS = 24
 
 
 def get_minimum_increment(current_price: Decimal) -> Decimal:
@@ -336,4 +339,151 @@ def settle_order_payment(order_id: str, user, transaction_id: str) -> dict:
         "status": order.status,
         "transaction_id": order.transaction_id,
         "paid_at": order.paid_at.isoformat(),
+    }
+
+@transaction.atomic
+def process_defaulted_order_and_second_chance(order_id: str) -> dict:
+    """
+    Called when a winner fails to pay. Expires the original order and
+    either generates a second-chance offer for the runner-up or marks the item UNSOLD.
+    """
+    try:
+        order = Order.objects.select_for_update().get(id=order_id)
+    except Order.DoesNotExist:
+        raise AuctionDomainException("Order not found.")
+
+    if order.status != Order.Status.PENDING_PAYMENT:
+        return {"order_id": str(order.id), "status": order.status, "action": "ignored"}
+
+    auction = Auction.objects.select_for_update().get(id=order.auction_id)
+
+    # 1. Mark original winner's order as EXPIRED
+    order.status = Order.Status.EXPIRED
+    order.save(update_fields=["status", "updated_at"])
+
+    # 2. Query runner-up from ProxyBid table (excluding defaulted winner)
+    runner_up_proxy = (
+        ProxyBid.objects.select_for_update()
+        .filter(auction=auction)
+        .exclude(bidder=order.buyer)
+        .order_by("-max_amount", "created_at")
+        .first()
+    )
+
+    # 3. Check viability of second-chance offer
+    can_offer = False
+    if runner_up_proxy:
+        # Offered at runner-up's maximum budget ceiling
+        offered_amount = runner_up_proxy.max_amount
+        if not auction.reserve_price or offered_amount >= auction.reserve_price:
+            can_offer = True
+
+    if not can_offer:
+        # No viable runner-up -> Listing becomes UNSOLD
+        auction.status = Auction.Status.UNSOLD
+        auction.save(update_fields=["status", "updated_at"])
+        return {
+            "order_id": str(order.id),
+            "auction_id": str(auction.id),
+            "action": "marked_unsold",
+            "offer_id": None,
+        }
+
+    # 4. Create SecondChanceOffer
+    expires_at = timezone.now() + timedelta(hours=SECOND_CHANCE_WINDOW_HOURS)
+    offer, _ = SecondChanceOffer.objects.get_or_create(
+        auction=auction,
+        recipient=runner_up_proxy.bidder,
+        defaults={
+            "amount": runner_up_proxy.max_amount,
+            "status": SecondChanceOffer.Status.PENDING,
+            "expires_at": expires_at,
+        },
+    )
+
+    # 5. Broadcast targeted WebSocket notification to runner-up
+    channel_layer = get_channel_layer()
+    if channel_layer:
+        async_to_sync(channel_layer.group_send)(
+            f"user_{runner_up_proxy.bidder.id}",
+            {
+                "type": "second_chance_notification",
+                "data": {
+                    "offer_id": str(offer.id),
+                    "auction_id": str(auction.id),
+                    "auction_title": auction.title,
+                    "amount": str(offer.amount),
+                    "expires_at": offer.expires_at.isoformat(),
+                    "message": f"Good news! The winner defaulted. You have a second-chance offer to buy '{auction.title}' for ${offer.amount}.",
+                },
+            },
+        )
+
+    return {
+        "order_id": str(order.id),
+        "auction_id": str(auction.id),
+        "action": "offer_created",
+        "offer_id": str(offer.id),
+        "recipient": runner_up_proxy.bidder.username,
+        "amount": str(offer.amount),
+    }
+
+
+@transaction.atomic
+def respond_to_second_chance_offer(offer_id: str, user, accept: bool) -> dict:
+    """
+    Processes recipient acceptance or rejection of a second-chance offer.
+    """
+    try:
+        offer = SecondChanceOffer.objects.select_for_update().get(id=offer_id)
+    except SecondChanceOffer.DoesNotExist:
+        raise AuctionDomainException("Second-chance offer not found.")
+
+    if offer.recipient != user:
+        raise AuctionDomainException("You do not have permission to respond to this offer.")
+
+    if offer.status != SecondChanceOffer.Status.PENDING:
+        raise AuctionDomainException(f"Offer is no longer pending (current status: {offer.status}).")
+
+    if offer.is_expired:
+        offer.status = SecondChanceOffer.Status.EXPIRED
+        offer.save(update_fields=["status", "updated_at"])
+        raise AuctionDomainException("This second-chance offer has expired.")
+
+    auction = Auction.objects.select_for_update().get(id=offer.auction_id)
+
+    if not accept:
+        offer.status = SecondChanceOffer.Status.DECLINED
+        offer.save(update_fields=["status", "updated_at"])
+        auction.status = Auction.Status.UNSOLD
+        auction.save(update_fields=["status", "updated_at"])
+        return {
+            "offer_id": str(offer.id),
+            "status": offer.status,
+            "order_id": None,
+        }
+
+    # Recipient accepts: Mark ACCEPTED, update auction winner, create new Order
+    offer.status = SecondChanceOffer.Status.ACCEPTED
+    offer.save(update_fields=["status", "updated_at"])
+
+    auction.highest_bidder = user
+    auction.current_price = offer.amount
+    auction.status = Auction.Status.CLOSED
+    auction.save(update_fields=["highest_bidder", "current_price", "status", "updated_at"])
+
+    new_order = Order.objects.create(
+        auction=auction,
+        buyer=user,
+        amount=offer.amount,
+        payment_due_at=timezone.now() + timedelta(hours=PAYMENT_WINDOW_HOURS),
+        status=Order.Status.PENDING_PAYMENT,
+    )
+
+    return {
+        "offer_id": str(offer.id),
+        "status": offer.status,
+        "order_id": str(new_order.id),
+        "amount": str(new_order.amount),
+        "payment_due_at": new_order.payment_due_at.isoformat(),
     }

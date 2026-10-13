@@ -8,6 +8,8 @@ from .views import (
     AuctionBuyItNowView,
     OrderDetailView,
     OrderPayView,
+    SecondChanceOfferListView,
+    SecondChanceOfferRespondView,
 )
 
 urlpatterns = [
@@ -19,4 +21,6 @@ urlpatterns = [
     path("<uuid:pk>/bids/", AuctionBidHistoryView.as_view(), name="auction_bid_history"),
     path("<uuid:pk>/proxy-bid/", AuctionProxyBidView.as_view(), name="auction_proxy_bid"),
     path("<uuid:pk>/buy-it-now/", AuctionBuyItNowView.as_view(), name="auction_buy_it_now"),
+    path("second-chance/", SecondChanceOfferListView.as_view(), name="second_chance_list"),
+    path("second-chance/<uuid:pk>/respond/", SecondChanceOfferRespondView.as_view(), name="second_chance_respond"),
 ]
