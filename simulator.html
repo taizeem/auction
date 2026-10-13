@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Real-Time Auction Simulator</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: #121826;
+      --card-border: #1f293d;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --danger: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.15);
+      --success: #10b981;
+      --success-bg: rgba(16, 185, 129, 0.15);
+      --warning: #f59e0b;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg); color: var(--text-main); min-height: 100vh; padding: 20px; }
+
+    /* Header Config Bar */
+    .top-bar {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 16px 24px;
+      margin-bottom: 20px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .top-bar h1 { font-size: 1.25rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; }
+    .config-inputs { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .input-group { display: flex; align-items: center; gap: 6px; }
+    label { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    input[type="text"] {
+      background: #0b0f19;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      color: #fff;
+      padding: 6px 12px;
+      font-size: 0.875rem;
+      outline: none;
+    }
+    input[type="text"]:focus { border-color: var(--accent); }
+
+    /* Grid Layout: 3 Columns */
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 20px; }
+    .panel {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: hidden;
+      min-height: 650px;
+    }
+    .panel-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .panel-title { font-size: 1rem; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+    .badge {
+      font-size: 0.75rem;
+      padding: 3px 8px;
+      border-radius: 20px;
+      font-weight: 600;
+    }
+    .badge-status { background: #1e293b; color: #94a3b8; }
+    .badge-online { background: var(--success-bg); color: var(--success); }
+    .badge-spectator { background: rgba(59, 130, 246, 0.2); color: var(--accent); }
+
+    /* Panel Content */
+    .panel-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; flex-grow: 1; }
+    .metrics-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .metric-card {
+      background: #0b0f19;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+    }
+    .metric-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px; }
+    .metric-value { font-size: 1.35rem; font-weight: 700; color: #fff; }
+    .metric-value.price { color: var(--success); }
+    .metric-value.countdown { color: var(--warning); font-family: monospace; }
+
+    /* Anti-snipe banner */
+    .snipe-alert {
+      display: none;
+      background: var(--success-bg);
+      border: 1px solid var(--success);
+      color: var(--success);
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-align: center;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse { 0% { opacity: 0.8; } 50% { opacity: 1; } 100% { opacity: 0.8; } }
+
+    /* Toast Notification Container */
+    .toast-box {
+      min-height: 48px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .toast {
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      animation: slideIn 0.3s ease;
+    }
+    .toast.outbid { background: var(--danger-bg); border: 1px solid var(--danger); color: #fca5a5; }
+    .toast.info { background: rgba(59, 130, 246, 0.15); border: 1px solid var(--accent); color: #93c5fd; }
+    @keyframes slideIn { from { transform: translateY(-10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+    /* Action Forms */
+    .controls { display: flex; flex-direction: column; gap: 10px; background: #0b0f19; padding: 14px; border-radius: 8px; border: 1px solid var(--card-border); }
+    .input-row { display: flex; gap: 8px; }
+    .input-row input { flex: 1; }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover { background: var(--accent-hover); }
+    button.btn-danger { background: var(--danger); }
+    button.btn-danger:hover { background: #dc2626; }
+    button.btn-success { background: var(--success); }
+    button.btn-success:hover { background: #059669; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Live Feed / Audit Log */
+    .feed-container {
+      flex: 1;
+      background: #070a10;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 10px;
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: #cbd5e1;
+      overflow-y: auto;
+      max-height: 220px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .feed-item { padding: 4px 6px; border-radius: 4px; border-left: 2px solid var(--card-border); background: #0b0f17; }
+    .feed-item.bid { border-left-color: var(--success); }
+    .feed-item.alert { border-left-color: var(--danger); color: #fca5a5; }
+    .feed-item.presence { border-left-color: var(--accent); color: #93c5fd; }
+  </style>
+</head>
+<body>
+
+  <!-- Top Configuration Bar -->
+  <div class="top-bar">
+    <h1><span>🔨</span> Real-Time Auction Bidding Simulator</h1>
+    <div class="config-inputs">
+      <div class="input-group">
+        <label>Backend Host</label>
+        <input type="text" id="hostInput" value="127.0.0.1:8000" style="width: 140px;">
+      </div>
+      <div class="input-group">
+        <label>Auction UUID</label>
+        <input type="text" id="auctionIdInput" placeholder="Paste Auction UUID" style="width: 290px;">
+      </div>
+      <button onclick="reconnectAll()">Sync & Connect All</button>
+    </div>
+  </div>
+
+  <!-- 3-Column Split View -->
+  <div class="grid">
+
+    <!-- PANEL 1: Alice (Bidder A) -->
+    <div class="panel" id="panel-alice">
+      <div class="panel-header">
+        <div class="panel-title"><span>👤</span> Bidder A (Alice)</div>
+        <span class="badge badge-status" id="alice-status">DISCONNECTED</span>
+      </div>
+      <div class="panel-body">
+        <div class="input-group" style="flex-direction: column; align-items: stretch;">
+          <label>Alice's JWT Token</label>
+          <input type="text" id="alice-token" placeholder="Paste Access Token for Alice">
+        </div>
+
+        <div class="metrics-row">
+          <div class="metric-card">
+            <div class="metric-label">Public Price</div>
+            <div class="metric-value price" id="alice-price">$0.00</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Leading Bidder</div>
+            <div class="metric-value" id="alice-leader" style="font-size: 1rem;">-</div>
+          </div>
+        </div>
+
+        <div class="snipe-alert" id="alice-snipe">⚡ Anti-Sniping Triggered (+120s Extended)</div>
+        <div class="toast-box" id="alice-toasts"></div>
+
+        <div class="controls">
+          <label>Place Proxy Maximum Budget</label>
+          <div class="input-row">
+            <input type="text" id="alice-amount" placeholder="e.g. 150.00">
+            <button onclick="sendBid('alice')">Place Bid</button>
+          </div>
+          <button class="btn-success" onclick="buyItNow('alice')">Instant Buy It Now</button>
+        </div>
+
+        <div class="feed-container" id="alice-feed"></div>
+      </div>
+    </div>
+
+    <!-- PANEL 2: Bob (Bidder B) -->
+    <div class="panel" id="panel-bob">
+      <div class="panel-header">
+        <div class="panel-title"><span>👤</span> Bidder B (Bob)</div>
+        <span class="badge badge-status" id="bob-status">DISCONNECTED</span>
+      </div>
+      <div class="panel-body">
+        <div class="input-group" style="flex-direction: column; align-items: stretch;">
+          <label>Bob's JWT Token</label>
+          <input type="text" id="bob-token" placeholder="Paste Access Token for Bob">
+        </div>
+
+        <div class="metrics-row">
+          <div class="metric-card">
+            <div class="metric-label">Public Price</div>
+            <div class="metric-value price" id="bob-price">$0.00</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Leading Bidder</div>
+            <div class="metric-value" id="bob-leader" style="font-size: 1rem;">-</div>
+          </div>
+        </div>
+
+        <div class="snipe-alert" id="bob-snipe">⚡ Anti-Sniping Triggered (+120s Extended)</div>
+        <div class="toast-box" id="bob-toasts"></div>
+
+        <div class="controls">
+          <label>Place Proxy Maximum Budget</label>
+          <div class="input-row">
+            <input type="text" id="bob-amount" placeholder="e.g. 200.00">
+            <button onclick="sendBid('bob')">Place Bid</button>
+          </div>
+          <button class="btn-success" onclick="buyItNow('bob')">Instant Buy It Now</button>
+        </div>
+
+        <div class="feed-container" id="bob-feed"></div>
+      </div>
+    </div>
+
+    <!-- PANEL 3: Anonymous Spectator / Public Feed -->
+    <div class="panel" id="panel-spectator">
+      <div class="panel-header">
+        <div class="panel-title"><span>👀</span> Public Spectator View</div>
+        <span class="badge badge-spectator" id="spectator-count">👥 0 Watching</span>
+      </div>
+      <div class="panel-body">
+        <div class="metrics-row">
+          <div class="metric-card">
+            <div class="metric-label">Current Auction Price</div>
+            <div class="metric-value price" id="public-price">$0.00</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Time Remaining</div>
+            <div class="metric-value countdown" id="public-timer">--:--</div>
+          </div>
+        </div>
+
+        <div class="snipe-alert" id="public-snipe">⚡ Anti-Sniping Triggered (+120s Extended)</div>
+
+        <div class="metric-card" style="text-align: left;">
+          <div class="metric-label">Highest Bidder (Masked)</div>
+          <div class="metric-value" id="public-leader" style="font-size: 1.1rem; color: #38bdf8;">None</div>
+        </div>
+
+        <label style="margin-top: 8px;">Public Event Broadcast Log</label>
+        <div class="feed-container" id="spectator-feed" style="max-height: 380px;"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // State storage for clients
+    const clients = {
+      alice: { ws: null, endsAt: null },
+      bob: { ws: null, endsAt: null },
+      spectator: { ws: null, endsAt: null }
+    };
+
+    let countdownInterval = null;
+
+    function getWsUrl(token = null) {
+      const host = document.getElementById("hostInput").value.trim();
+      const auctionId = document.getElementById("auctionIdInput").value.trim();
+      if (!auctionId) return null;
+      let url = `ws://${host}/ws/auctions/${auctionId}/`;
+      if (token) url += `?token=${token.trim()}`;
+      return url;
+    }
+
+    function initClient(name, token = null) {
+      if (clients[name].ws) {
+        clients[name].ws.close();
+      }
+
+      const url = getWsUrl(token);
+      if (!url) return;
+
+      const statusEl = document.getElementById(`${name}-status`);
+      const ws = new WebSocket(url);
+      clients[name].ws = ws;
+
+      ws.onopen = () => {
+        if (statusEl) {
+          statusEl.textContent = "CONNECTED";
+          statusEl.className = "badge badge-online";
+        }
+        log(name, "System", "WebSocket connection opened.", "presence");
+      };
+
+      ws.onclose = () => {
+        if (statusEl) {
+          statusEl.textContent = "DISCONNECTED";
+          statusEl.className = "badge badge-status";
+        }
+        log(name, "System", "WebSocket connection closed.", "alert");
+      };
+
+      ws.onmessage = (event) => {
+        const payload = JSON.parse(event.data);
+        handleMessage(name, payload);
+      };
+
+      ws.onerror = () => {
+        log(name, "Error", "WebSocket encountered a network error.", "alert");
+      };
+    }
+
+    function handleMessage(name, payload) {
+      switch (payload.type) {
+        case "viewer_count":
+          document.getElementById("spectator-count").textContent = `👥 ${payload.count} Watching`;
+          log(name, "Presence", `Active spectators: ${payload.count}`, "presence");
+          break;
+
+        case "new_bid":
+          updatePrice(payload.data.amount, payload.data.highest_bidder);
+          updateCountdown(payload.data.ends_at);
+          log(name, "Bid", `New price: $${payload.data.amount} by ${payload.data.highest_bidder}`, "bid");
+
+          if (payload.data.extended) {
+            triggerSnipeBanner();
+          }
+          break;
+
+        case "proxy_bid_accepted":
+          showToast(name, `Proxy budget accepted: $${payload.data.your_max_budget}`, "info");
+          log(name, "Proxy", `Budget confirmed: $${payload.data.your_max_budget}`, "bid");
+          break;
+
+        case "outbid_alert":
+          showToast(name, `🚨 ALERT: You were outbid! New price: $${payload.data.new_price}`, "outbid");
+          log(name, "Outbid", payload.data.message, "alert");
+          break;
+
+        case "auction_closed":
+          log(name, "Closed", `Auction concluded! Reason: ${payload.data.reason}. Winner: ${payload.data.winner || 'None'} ($${payload.data.final_price})`, "alert");
+          alert(`Auction closed! Reason: ${payload.data.reason}\nWinner: ${payload.data.winner || 'None'} ($${payload.data.final_price})`);
+          break;
+
+        case "error":
+          if (payload.code === "rate_limited") {
+            showToast(name, `⚠️ Rate limited! Wait ${payload.retry_after}s.`, "outbid");
+          } else {
+            showToast(name, `Error: ${payload.message}`, "outbid");
+          }
+          log(name, "Error", payload.message, "alert");
+          break;
+      }
+    }
+
+    function updatePrice(price, leader) {
+      ["alice", "bob"].forEach(id => {
+        const pEl = document.getElementById(`${id}-price`);
+        const lEl = document.getElementById(`${id}-leader`);
+        if (pEl) pEl.textContent = `$${parseFloat(price).toFixed(2)}`;
+        if (lEl) lEl.textContent = leader;
+      });
+
+      document.getElementById("public-price").textContent = `$${parseFloat(price).toFixed(2)}`;
+      document.getElementById("public-leader").textContent = leader;
+    }
+
+    function updateCountdown(endsAtIso) {
+      clients.spectator.endsAt = new Date(endsAtIso);
+      if (!countdownInterval) {
+        countdownInterval = setInterval(tickCountdown, 1000);
+      }
+      tickCountdown();
+    }
+
+    function tickCountdown() {
+      if (!clients.spectator.endsAt) return;
+      const now = new Date();
+      const diff = clients.spectator.endsAt - now;
+
+      const timerEl = document.getElementById("public-timer");
+      if (diff <= 0) {
+        timerEl.textContent = "00:00 (ENDED)";
+        timerEl.style.color = "var(--danger)";
+        return;
+      }
+
+      const totalSeconds = Math.floor(diff / 1000);
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      timerEl.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+
+    function triggerSnipeBanner() {
+      const banners = [
+        document.getElementById("alice-snipe"),
+        document.getElementById("bob-snipe"),
+        document.getElementById("public-snipe")
+      ];
+      banners.forEach(b => {
+        b.style.display = "block";
+        setTimeout(() => { b.style.display = "none"; }, 4000);
+      });
+    }
+
+    function showToast(panelId, message, type) {
+      const container = document.getElementById(`${panelId}-toasts`);
+      if (!container) return;
+      const toast = document.createElement("div");
+      toast.className = `toast ${type}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => { toast.remove(); }, 5000);
+    }
+
+    function log(panelId, tag, message, type = "") {
+      const feed = document.getElementById(`${panelId}-feed`);
+      if (!feed) return;
+      const item = document.createElement("div");
+      item.className = `feed-item ${type}`;
+      const time = new Date().toLocaleTimeString();
+      item.innerHTML = `<strong>[${time}] ${tag}:</strong> ${message}`;
+      feed.prepend(item);
+    }
+
+    function sendBid(user) {
+      const client = clients[user];
+      if (!client.ws || client.ws.readyState !== WebSocket.OPEN) {
+        alert(`${user.toUpperCase()} is not connected!`);
+        return;
+      }
+      const amountInput = document.getElementById(`${user}-amount`);
+      const val = amountInput.value.trim();
+      if (!val) return;
+
+      client.ws.send(JSON.stringify({
+        action: "place_bid",
+        max_amount: val
+      }));
+      amountInput.value = "";
+    }
+
+    async function buyItNow(user) {
+      const token = document.getElementById(`${user}-token`).value.trim();
+      const auctionId = document.getElementById("auctionIdInput").value.trim();
+      const host = document.getElementById("hostInput").value.trim();
+
+      if (!token) {
+        alert("JWT Token required for Buy It Now!");
+        return;
+      }
+      if (!confirm(`Are you sure ${user.toUpperCase()} wants to trigger instant Buy It Now?`)) return;
+
+      try {
+        const res = await fetch(`http://${host}/api/auctions/${auctionId}/buy-it-now/`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json"
+          }
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Request failed");
+        showToast(user, `🎉 Won item via Buy It Now at $${data.final_price}!`, "info");
+      } catch (err) {
+        showToast(user, `Buy It Now error: ${err.message}`, "outbid");
+      }
+    }
+
+    function reconnectAll() {
+      const auctionId = document.getElementById("auctionIdInput").value.trim();
+      if (!auctionId) {
+        alert("Please specify an Auction UUID first!");
+        return;
+      }
+
+      const aliceToken = document.getElementById("alice-token").value;
+      const bobToken = document.getElementById("bob-token").value;
+
+      initClient("alice", aliceToken);
+      initClient("bob", bobToken);
+      initClient("spectator", null); // Anonymous watcher
+    }
+  </script>
+</body>
+</html>

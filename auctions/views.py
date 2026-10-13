@@ -85,7 +85,7 @@ class AuctionListCreateView(generics.ListCreateAPIView):
         return queryset
 
 
-class AuctionDetailView(generics.RetrieveAPIView):
+class AuctionDetailView(generics.RetrieveUpdateAPIView):
     """
     GET /api/auctions/<uuid:pk>/ -> Retrieve full details for a single item.
     """
