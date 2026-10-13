@@ -1,11 +1,15 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import timedelta
 from django.db import transaction
 from django.utils import timezone
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer
+from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer, UserWallet, DepositHold
 
+DEPOSIT_HOLD_PERCENTAGE = Decimal("0.10")
+def calculate_required_deposit(amount: Decimal) -> Decimal:
+    """Calculates 10% hold rounded to nearest cent."""
+    return (amount * DEPOSIT_HOLD_PERCENTAGE).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 class AuctionDomainException(Exception):
     """Domain exception raised when business rules are violated."""
@@ -106,6 +110,12 @@ def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
     if auction.seller_id and auction.seller_id == user.id:
         raise AuctionDomainException("Sellers are not permitted to bid on their own auctions.")
 
+    #Acquire or adjust 10% security deposit hold before processing bid
+    acquire_or_adjust_deposit_hold(user, auction, max_amount)
+
+    previous_leader = auction.highest_bidder
+    now = timezone.now()
+
     previous_leader = auction.highest_bidder
     now = timezone.now()
     previous_leader = auction.highest_bidder
@@ -194,6 +204,11 @@ def execute_proxy_bid(auction_id: str, user, max_amount: Decimal) -> dict:
         amount=new_price,
     )
 
+    if previous_leader and auction.highest_bidder != previous_leader:
+        # Check if the previous leader's proxy budget was completely exceeded
+        prev_proxy = ProxyBid.objects.filter(auction=auction, bidder=previous_leader).first()
+        if prev_proxy and prev_proxy.max_amount <= auction.current_price:
+            release_deposit_hold(previous_leader, auction)
     return {
         "auction_id": str(auction.id),
         "auction_title": auction.title,
@@ -323,6 +338,7 @@ def settle_order_payment(order_id: str, user, transaction_id: str) -> dict:
     If the order is overdue, commits the EXPIRED status before raising the domain error.
     """
     is_overdue = False
+    capture_deposit_hold(order.buyer, order.auction)
 
     with transaction.atomic():
         try:
@@ -373,6 +389,8 @@ def process_defaulted_order_and_second_chance(order_id: str) -> dict:
         order = Order.objects.select_for_update().get(id=order_id)
     except Order.DoesNotExist:
         raise AuctionDomainException("Order not found.")
+    
+    forfeit_deposit_hold(order.buyer, auction)
 
     if order.status != Order.Status.PENDING_PAYMENT:
         return {"order_id": str(order.id), "status": order.status, "action": "ignored"}
@@ -539,3 +557,108 @@ def cancel_auction(auction_id: str, user) -> dict:
         "title": auction.title,
         "status": auction.status,
     }
+
+@transaction.atomic
+def acquire_or_adjust_deposit_hold(user, auction: Auction, target_max_amount: Decimal) -> DepositHold:
+    """
+    Ensures user has an active deposit hold equal to 10% of their target proxy budget.
+    Deducts delta from available wallet balance.
+    """
+    wallet, _ = UserWallet.objects.select_for_update().get_or_create(user=user)
+    required_hold = calculate_required_deposit(target_max_amount)
+
+    # Check for existing active hold for this user on this auction
+    current_hold = (
+        DepositHold.objects.select_for_update()
+        .filter(user=user, auction=auction, status=DepositHold.Status.HELD)
+        .first()
+    )
+
+    previous_hold_amount = current_hold.amount if current_hold else Decimal("0.00")
+    delta = required_hold - previous_hold_amount
+
+    if delta > Decimal("0.00"):
+        if wallet.available_balance < delta:
+            raise AuctionDomainException(
+                f"Insufficient funds: A 10% security deposit hold of ${required_hold} "
+                f"is required to place this bid. Available balance: ${wallet.available_balance}."
+            )
+        wallet.held_balance += delta
+        wallet.save(update_fields=["held_balance", "updated_at"])
+
+    if current_hold:
+        current_hold.amount = required_hold
+        current_hold.save(update_fields=["amount", "updated_at"])
+        return current_hold
+    else:
+        return DepositHold.objects.create(
+            user=user,
+            auction=auction,
+            amount=required_hold,
+            status=DepositHold.Status.HELD,
+        )
+
+
+@transaction.atomic
+def release_deposit_hold(user, auction: Auction) -> None:
+    """
+    Releases active deposit hold back to user's available wallet balance (e.g. when outbid).
+    """
+    hold = (
+        DepositHold.objects.select_for_update()
+        .filter(user=user, auction=auction, status=DepositHold.Status.HELD)
+        .first()
+    )
+    if not hold:
+        return
+
+    wallet, _ = UserWallet.objects.select_for_update().get_or_create(user=user)
+    wallet.held_balance = max(Decimal("0.00"), wallet.held_balance - hold.amount)
+    wallet.save(update_fields=["held_balance", "updated_at"])
+
+    hold.status = DepositHold.Status.RELEASED
+    hold.save(update_fields=["status", "updated_at"])
+
+
+@transaction.atomic
+def forfeit_deposit_hold(user, auction: Auction) -> None:
+    """
+    Forfeits deposit hold as penalty when a winner defaults. Deducts directly from balance.
+    """
+    hold = (
+        DepositHold.objects.select_for_update()
+        .filter(user=user, auction=auction, status=DepositHold.Status.HELD)
+        .first()
+    )
+    if not hold:
+        return
+
+    wallet, _ = UserWallet.objects.select_for_update().get_or_create(user=user)
+    wallet.held_balance = max(Decimal("0.00"), wallet.held_balance - hold.amount)
+    wallet.balance = max(Decimal("0.00"), wallet.balance - hold.amount)
+    wallet.save(update_fields=["held_balance", "balance", "updated_at"])
+
+    hold.status = DepositHold.Status.FORFEITED
+    hold.save(update_fields=["status", "updated_at"])
+
+
+@transaction.atomic
+def capture_deposit_hold(user, auction: Auction) -> None:
+    """
+    Captures deposit hold upon successful checkout payment.
+    """
+    hold = (
+        DepositHold.objects.select_for_update()
+        .filter(user=user, auction=auction, status=DepositHold.Status.HELD)
+        .first()
+    )
+    if not hold:
+        return
+
+    wallet, _ = UserWallet.objects.select_for_update().get_or_create(user=user)
+    wallet.held_balance = max(Decimal("0.00"), wallet.held_balance - hold.amount)
+    wallet.balance = max(Decimal("0.00"), wallet.balance - hold.amount)
+    wallet.save(update_fields=["held_balance", "balance", "updated_at"])
+
+    hold.status = DepositHold.Status.CAPTURED
+    hold.save(update_fields=["status", "updated_at"])

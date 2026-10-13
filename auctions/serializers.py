@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer
+from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer, UserWallet, DepositHold
 
 
 def mask_username(username: str | None) -> str:
@@ -282,3 +282,16 @@ class SecondChanceOfferSerializer(serializers.ModelSerializer):
 
 class SecondChanceActionSerializer(serializers.Serializer):
     accept = serializers.BooleanField(required=True)
+
+
+class UserWalletSerializer(serializers.ModelSerializer):
+    available_balance = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = UserWallet
+        fields = ["balance", "held_balance", "available_balance", "updated_at"]
+        read_only_fields = ["held_balance", "available_balance", "updated_at"]
+
+
+class WalletDepositFundSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("1.00"))

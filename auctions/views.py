@@ -6,7 +6,8 @@ from rest_framework import generics, permissions, filters, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import get_object_or_404
-from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer
+from django.db import transaction
+from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer, UserWallet
 from .services import (
     execute_proxy_bid, 
     AuctionDomainException, 
@@ -24,7 +25,9 @@ from .serializers import (
     OrderSerializer,
     PaymentSubmitSerializer,
     SecondChanceOfferSerializer,
-    SecondChanceActionSerializer
+    SecondChanceActionSerializer,
+    UserWalletSerializer,
+    WalletDepositFundSerializer,
 )
 from .pagination import StandardResultsSetPagination
 
@@ -369,3 +372,28 @@ class SecondChanceOfferRespondView(APIView):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(result, status=status.HTTP_200_OK)
+
+
+class UserWalletView(APIView):
+    """
+    GET  /api/wallet/        -> Returns caller's balance, held amount, and available balance.
+    POST /api/wallet/topup/  -> Tops up simulated wallet funds.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        wallet, _ = UserWallet.objects.get_or_create(user=request.user)
+        serializer = UserWalletSerializer(wallet)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        serializer = WalletDepositFundSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        topup_amount = serializer.validated_data["amount"]
+
+        with transaction.atomic():
+            wallet, _ = UserWallet.objects.select_for_update().get_or_create(user=request.user)
+            wallet.balance += topup_amount
+            wallet.save(update_fields=["balance", "updated_at"])
+
+        return Response(UserWalletSerializer(wallet).data, status=status.HTTP_200_OK)

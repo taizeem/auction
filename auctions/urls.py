@@ -11,6 +11,7 @@ from .views import (
     OrderPayView,
     SecondChanceOfferListView,
     SecondChanceOfferRespondView,
+    UserWalletView,
 )
 
 urlpatterns = [
@@ -25,4 +26,5 @@ urlpatterns = [
     path("<uuid:pk>/buy-it-now/", AuctionBuyItNowView.as_view(), name="auction_buy_it_now"),
     path("second-chance/", SecondChanceOfferListView.as_view(), name="second_chance_list"),
     path("second-chance/<uuid:pk>/respond/", SecondChanceOfferRespondView.as_view(), name="second_chance_respond"),
+    path("wallet/", UserWalletView.as_view(), name="user_wallet"),
 ]
