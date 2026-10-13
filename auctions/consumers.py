@@ -182,32 +182,19 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 self.channel_name,
             )
 
-    async def receive_json(self, content, **kwargs):
+    async def receive_json(self, content):
         action = content.get("action")
 
-        if action == "place_bid":
-            user = self.scope.get("user")
-
-            # 1. Authentication Check
-            if not user or not user.is_authenticated:
+        # Accept either 'place_bid' or 'bid'
+        if action in ("place_bid", "bid"):
+            if not self.user or not self.user.is_authenticated:
                 await self.send_json({
                     "type": "error",
-                    "message": "Authentication required to place bids.",
+                    "message": "Authentication required to place a bid.",
                 })
                 return
 
-            # 2. Token-Bucket Rate Limiter Defense
-            allowed, retry_after = await is_bid_rate_limited(user.id)
-            if not allowed:
-                await self.send_json({
-                    "type": "error",
-                    "code": "rate_limited",
-                    "message": f"Bid rate limit exceeded. Please wait {retry_after:.1f}s before bidding again.",
-                    "retry_after": round(retry_after, 2),
-                })
-                return
-
-            # 3. Payload validation
+            # Support both 'max_amount' and 'amount' keys
             raw_amount = content.get("max_amount") or content.get("amount")
             if raw_amount is None:
                 await self.send_json({
@@ -217,20 +204,30 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 return
 
             try:
-                max_amount = Decimal(str(raw_amount))
-            except (InvalidOperation, TypeError, ValueError):
+                amount = Decimal(str(raw_amount))
+            except (InvalidOperation, TypeError):
                 await self.send_json({
                     "type": "error",
-                    "message": "Invalid bid amount format.",
+                    "message": "Invalid bid amount.",
                 })
                 return
 
-            # 4. Invoke pessimistic locking transaction in PostgreSQL
+            # Token-bucket rate limiting check
+            is_allowed, wait_time = await is_bid_rate_limited(self.user.id)
+            if not is_allowed:
+                await self.send_json({
+                    "type": "error",
+                    "code": "rate_limited",
+                    "retry_after": round(wait_time, 2),
+                    "message": f"Rate limit reached. Please wait {round(wait_time, 2)}s.",
+                })
+                return
+
             try:
                 bid_result = await sync_to_async(execute_proxy_bid)(
-                    auction_id=self.auction_id,
-                    user=user,
-                    max_amount=max_amount,
+                    self.auction_id,
+                    self.user,
+                    amount,
                 )
             except AuctionDomainException as exc:
                 await self.send_json({
@@ -239,63 +236,41 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
                 })
                 return
 
-            # 5. Private acknowledgment if max budget was supplied
-            if content.get("max_amount"):
-                await self.send_json({
-                    "type": "proxy_bid_accepted",
-                    "data": {
-                        "your_max_budget": bid_result["caller_max_amount"],
-                        "is_leading": bid_result["is_caller_leading"],
-                    },
-                })
-
-            # 6. Public room broadcast (masked username)
+            # 1. Broadcast the new public price to everyone in the room
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {
                     "type": "broadcast_bid",
-                    "bid_data": {
+                    "data": {
                         "auction_id": bid_result["auction_id"],
-                        "amount": bid_result["amount"],
+                        "amount": bid_result["current_price"],
                         "highest_bidder": mask_username(bid_result["highest_bidder"]),
-                        "bid_id": bid_result["bid_id"],
                         "ends_at": bid_result["ends_at"],
                         "extended": bid_result["extended"],
-                        "timestamp": bid_result["timestamp"],
                     },
                 },
             )
 
-            # 7. Targeted private alert to displaced highest bidder
-            displaced_id = bid_result.get("displaced_user_id")
-            if displaced_id:
-                await self.channel_layer.group_send(
-                    f"user_{displaced_id}",
-                    {
-                        "type": "outbid_notification",
-                        "data": {
-                            "auction_id": bid_result["auction_id"],
-                            "auction_title": bid_result["auction_title"],
-                            "new_price": bid_result["amount"],
-                            "message": f"You have been outbid on '{bid_result['auction_title']}'. Current price is now ${bid_result['amount']}.",
-                        },
-                    },
-                )
+            # 2. Privately confirm the maximum budget to the bidder
+            await self.send_json({
+                "type": "proxy_bid_accepted",
+                "data": {
+                    "auction_id": bid_result["auction_id"],
+                    "your_max_budget": bid_result["your_max_budget"],
+                },
+            })
 
         else:
             await self.send_json({
                 "type": "error",
                 "message": f"Unsupported action: '{action}'.",
             })
-
-    # -------------------------------------------------------------------------
-    # Channel Layer Group Event Handlers
-    # -------------------------------------------------------------------------
-
     async def broadcast_bid(self, event):
+        """Broadcasts new public bid standing to all WebSocket subscribers."""
+        bid_data = event.get("data") or event.get("bid_data") or {}
         await self.send_json({
             "type": "new_bid",
-            "data": event["bid_data"],
+            "data": bid_data,
         })
 
     async def broadcast_auction_closed(self, event):
@@ -315,11 +290,16 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
             "type": "viewer_count",
             "count": event["count"],
         })
-    async def second_chance_notification(self, event):
-        """
-        Pushed to user_<id> when a second-chance offer is issued.
-        """
+    async def targeted_outbid_alert(self, event):
+        """Dispatches private outbid notification to displaced bidder."""
         await self.send_json({
-            "type": "second_chance_offer",
-            "data": event["data"],
+            "type": "targeted_outbid_alert",
+            "data": event.get("data") or {},
         })
+    async def second_chance_notification(self, event):
+        """Dispatches private second-chance offer notification to runner-up."""
+        await self.send_json({
+            "type": "second_chance_notification",
+            "data": event.get("data") or {},
+        })
+
