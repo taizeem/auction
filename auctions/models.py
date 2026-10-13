@@ -199,3 +199,54 @@ class SecondChanceOffer(models.Model):
     @property
     def is_expired(self) -> bool:
         return timezone.now() > self.expires_at
+
+
+class UserWallet(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="wallet"
+    )
+    balance = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0.00")
+    )
+    held_balance = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0.00")
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def available_balance(self) -> Decimal:
+        return self.balance - self.held_balance
+
+    def __str__(self):
+        return f"{self.user.username}'s Wallet (${self.available_balance} available)"
+
+
+class DepositHold(models.Model):
+    class Status(models.TextChoices):
+        HELD = "HELD", "Held"
+        RELEASED = "RELEASED", "Released"
+        CAPTURED = "CAPTURED", "Captured"
+        FORFEITED = "FORFEITED", "Forfeited"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="deposit_holds"
+    )
+    auction = models.ForeignKey(
+        Auction, on_delete=models.CASCADE, related_name="deposit_holds"
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(
+        max_length=12, choices=Status.choices, default=Status.HELD
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "auction", "status"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self):
+        return f"Hold ${self.amount} for {self.user.username} on {self.auction.title} [{self.status}]"
