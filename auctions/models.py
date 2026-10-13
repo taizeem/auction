@@ -11,27 +11,26 @@ class Auction(models.Model):
         ACTIVE = "ACTIVE", "Active"
         CLOSED = "CLOSED", "Closed"
         UNSOLD = "UNSOLD", "Unsold"
+        CANCELLED = "CANCELLED", "Cancelled"  
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    seller = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="auctions",
+        null=True,
+        blank=True,
+    )
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     starting_price = models.DecimalField(max_digits=12, decimal_places=2)
     current_price = models.DecimalField(max_digits=12, decimal_places=2)
     
-    # Secret reserve price and instant purchase price
     reserve_price = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        null=True,
-        blank=True,
-        help_text="Secret minimum price required for a valid sale.",
+        max_digits=12, decimal_places=2, null=True, blank=True
     )
     buy_it_now_price = models.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        null=True,
-        blank=True,
-        help_text="Instant checkout price.",
+        max_digits=12, decimal_places=2, null=True, blank=True
     )
 
     highest_bidder = models.ForeignKey(
@@ -51,6 +50,7 @@ class Auction(models.Model):
     class Meta:
         indexes = [
             models.Index(fields=["status", "ends_at"]),
+            models.Index(fields=["seller", "status"]),
         ]
 
     def __str__(self):

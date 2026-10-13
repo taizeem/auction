@@ -5,8 +5,8 @@ from django.contrib.auth import get_user_model
 from django.db import connections
 from django.test import TransactionTestCase
 from django.utils import timezone
-from auctions.models import Auction, Bid, ProxyBid, SecondChanceOffer
-from auctions.services import execute_bid, AuctionDomainException, execute_proxy_bid, process_defaulted_order_and_second_chance, respond_to_second_chance_offer
+from auctions.models import Auction, Bid, ProxyBid, SecondChanceOffer, Order
+from auctions.services import execute_bid,AuctionDomainException, execute_proxy_bid, process_defaulted_order_and_second_chance, respond_to_second_chance_offer, close_auction, execute_buy_it_now
 
 User = get_user_model()
 
@@ -205,7 +205,7 @@ class ProxyBiddingEngineTests(TransactionTestCase):
         
         user_proxy = ProxyBid.objects.get(auction=self.auction, bidder=self.alice)
         self.assertEqual(user_proxy.max_amount, Decimal("400.00"))
-        
+
 class SecondChanceOfferTests(TransactionTestCase):
     def setUp(self):
         self.alice = User.objects.create_user(username="winner_alice", password="pw")
