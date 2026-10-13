@@ -3,7 +3,7 @@ from celery import shared_task
 from channels.layers import get_channel_layer
 from django.utils import timezone
 from .models import Auction, Order
-from .services import close_auction
+from .services import close_auction, process_defaulted_order_and_second_chance
 
 
 @shared_task
