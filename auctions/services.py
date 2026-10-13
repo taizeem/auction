@@ -4,7 +4,7 @@ from django.db import transaction
 from django.utils import timezone
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer, UserWallet, DepositHold
+from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer, UserWallet, DepositHold, LedgerAccount, LedgerEntry, LedgerTransaction
 
 DEPOSIT_HOLD_PERCENTAGE = Decimal("0.10")
 def calculate_required_deposit(amount: Decimal) -> Decimal:
@@ -421,6 +421,9 @@ def settle_order_payment(order_id: str, user, transaction_id: str) -> dict:
             # Capture deposit hold now that order is assigned and marked PAID
             capture_deposit_hold(order.buyer, order.auction)
 
+            if order.auction.seller:
+                record_order_settlement_ledger(order)
+
     # Raise after the atomic transaction has safely committed the EXPIRED state
     if is_overdue:
         raise AuctionDomainException("Payment window has expired for this order.")
@@ -695,6 +698,7 @@ def forfeit_deposit_hold(user, auction: Auction) -> None:
     )
     if not hold:
         return
+    record_deposit_forfeiture_ledger(user, auction, hold.amount)
 
     wallet, _ = UserWallet.objects.select_for_update().get_or_create(user=user)
     wallet.held_balance = max(Decimal("0.00"), wallet.held_balance - hold.amount)
