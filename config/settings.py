@@ -86,7 +86,16 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [os.environ["REDIS_CHANNEL_LAYER_URL"]],
+            "hosts": [
+                {
+                    "address": "redis://127.0.0.1:6379/0",
+                    # Must strictly exceed channels_redis's 5s BZPOPMIN polling window
+                    "socket_timeout": 30,
+                    "socket_connect_timeout": 5,
+                }
+            ],
+            "capacity": 1500,
+            "expiry": 60,
         },
     },
 }

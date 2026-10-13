@@ -9,11 +9,15 @@ from .services import execute_proxy_bid, AuctionDomainException
 from .serializers import mask_username
 
 
+# In auctions/consumers.py
+
 def get_redis_url() -> str:
     """Extract Redis connection URL from Django settings with safe fallbacks."""
     try:
         hosts = settings.CHANNEL_LAYERS["default"]["CONFIG"]["hosts"]
         host = hosts[0]
+        if isinstance(host, dict):
+            return host.get("address", "redis://127.0.0.1:6379/0")
         if isinstance(host, str):
             return host
         if isinstance(host, (list, tuple)):
@@ -23,6 +27,20 @@ def get_redis_url() -> str:
     return getattr(settings, "REDIS_URL", "redis://127.0.0.1:6379/0")
 
 
+_redis_pool = None
+
+
+def get_redis_client():
+    """Lazily creates async Redis connection pool."""
+    global _redis_pool
+    if _redis_pool is None:
+        _redis_pool = aioredis.from_url(
+            get_redis_url(),
+            decode_responses=True,
+            socket_timeout=30,
+            socket_connect_timeout=5,
+        )
+    return _redis_pool
 # Shared asynchronous Redis connection pool
 redis_client = aioredis.from_url(get_redis_url(), decode_responses=True)
 
