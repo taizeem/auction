@@ -109,6 +109,27 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = os.getenv("CELERY_TIMEZONE", "UTC")
 
+CELERY_BEAT_SCHEDULE = {
+    # 1. Close expired auctions every 30 seconds for tight soft-close precision
+    "close-expired-auctions-every-30-seconds": {
+        "task": "auctions.tasks.close_expired_auctions_task",
+        "schedule": 30.0,
+        "options": {"expires": 25},  # Drop task if queue stalls past 25s
+    },
+    # 2. Alert watchlist subscribers when items have <= 15 minutes remaining
+    "notify-ending-soon-every-minute": {
+        "task": "auctions.tasks.notify_ending_soon_auctions_task",
+        "schedule": 60.0,
+        "options": {"expires": 55},
+    },
+    # 3. Forfeit security deposits and trigger second-chance offers on overdue orders
+    "process-overdue-orders-every-minute": {
+        "task": "auctions.tasks.process_overdue_orders_task",
+        "schedule": 60.0,
+        "options": {"expires": 55},
+    },
+}
+
 # -----------------------------------------------------------------------------
 # DRF & SimpleJWT
 # -----------------------------------------------------------------------------
