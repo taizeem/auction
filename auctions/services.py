@@ -136,7 +136,7 @@ def execute_proxy_bid(
         amount=auction.current_price,
     )
 
-    # 12. If previous leader was completely displaced, release their deposit hold
+    # Displaced leader handling
     if previous_leader and auction.highest_bidder != previous_leader:
         prev_proxy = ProxyBid.objects.filter(
             auction=auction, bidder=previous_leader
@@ -160,7 +160,7 @@ def execute_proxy_bid(
             )
 
     return {
-        "bid_id": str(bid.id),  # <-- Required by views.py line 238
+        "bid_id": str(bid.id),  
         "auction_id": str(auction.id),
         "current_price": str(auction.current_price),
         "amount": str(auction.current_price),

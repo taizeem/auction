@@ -210,63 +210,35 @@ class AuctionProxyBidView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request, pk):
-        auction = get_object_or_404(Auction, id=pk)
-        input_serializer = SetProxyBidSerializer(data=request.data)
-        input_serializer.is_valid(raise_exception=True)
-        max_amount = input_serializer.validated_data["max_amount"]
+        max_amount = request.data.get("max_amount")
+        if max_amount is None:
+            return Response(
+                {"detail": "max_amount is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            bid_result = execute_proxy_bid(
-                auction_id=str(auction.id),
-                user=request.user,
-                max_amount=max_amount,
+            max_amount = Decimal(str(max_amount))
+        except (InvalidOperation, TypeError):
+            return Response(
+                {"detail": "Invalid amount format."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
+
+        try:
+            bid_result = execute_proxy_bid(str(pk), request.user, max_amount)
         except AuctionDomainException as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        channel_layer = get_channel_layer()
-        if channel_layer:
-            # 1. Public room broadcast
-            async_to_sync(channel_layer.group_send)(
-                f"auction_{auction.id}",
-                {
-                    "type": "broadcast_bid",
-                    "bid_data": {
-                        "auction_id": bid_result["auction_id"],
-                        "amount": bid_result["amount"],
-                        "highest_bidder": mask_username(bid_result["highest_bidder"]),
-                        "bid_id": bid_result["bid_id"],
-                        "ends_at": bid_result["ends_at"],
-                        "extended": bid_result["extended"],
-                        "timestamp": bid_result["timestamp"],
-                    },
-                },
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-            # 2. Targeted outbid alert
-            displaced_id = bid_result.get("displaced_user_id")
-            if displaced_id:
-                async_to_sync(channel_layer.group_send)(
-                    f"user_{displaced_id}",
-                    {
-                        "type": "outbid_notification",
-                        "data": {
-                            "auction_id": bid_result["auction_id"],
-                            "auction_title": bid_result["auction_title"],
-                            "new_price": bid_result["amount"],
-                            "message": f"You have been outbid on '{bid_result['auction_title']}'. Current price is now ${bid_result['amount']}.",
-                        },
-                    },
-                )
-
-        proxy_bid = ProxyBid.objects.get(auction=auction, bidder=request.user)
         return Response(
             {
                 "message": "Proxy bid placed successfully.",
                 "bid_id": bid_result.get("bid_id"),
                 "auction_id": bid_result.get("auction_id"),
-                "amount": bid_result.get("amount")
-                or bid_result.get("current_price"),
+                "amount": bid_result.get("amount") or bid_result.get("current_price"),
                 "current_price": bid_result.get("current_price"),
                 "max_amount": str(max_amount),
             },
