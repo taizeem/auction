@@ -295,3 +295,27 @@ class UserWalletSerializer(serializers.ModelSerializer):
 
 class WalletDepositFundSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("1.00"))
+
+
+class SellerEarningsSerializer(serializers.Serializer):
+    seller_id = serializers.IntegerField(read_only=True)
+    username = serializers.CharField(read_only=True)
+    payable_account_code = serializers.CharField(read_only=True)
+    available_balance = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True
+    )
+    total_earned = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True
+    )
+    total_paid_out = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True
+    )
+
+
+class SellerPayoutRequestSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("10.00")
+    )
+    payout_method = serializers.ChoiceField(
+        choices=["STRIPE", "BANK_TRANSFER"], default="STRIPE"
+    )

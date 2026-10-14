@@ -1,4 +1,6 @@
+import uuid
 from decimal import Decimal, InvalidOperation
+from django.db.models import Sum, Q
 from django.utils import timezone
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -7,14 +9,17 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import get_object_or_404
 from django.db import transaction
-from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer, UserWallet
+from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer, UserWallet, LedgerEntry, LedgerAccount
 from .services import (
     execute_proxy_bid, 
     AuctionDomainException, 
     execute_buy_it_now, 
     settle_order_payment, 
     respond_to_second_chance_offer, 
-    cancel_auction)
+    cancel_auction,
+    get_or_create_seller_payable_account,
+    record_seller_payout_ledger
+    )
 from .serializers import (
     AuctionSerializer,
     BidHistorySerializer,
@@ -28,6 +33,8 @@ from .serializers import (
     SecondChanceActionSerializer,
     UserWalletSerializer,
     WalletDepositFundSerializer,
+    SellerEarningsSerializer,
+    SellerPayoutRequestSerializer
 )
 from .pagination import StandardResultsSetPagination
 
@@ -372,3 +379,60 @@ class UserWalletView(APIView):
             wallet.save(update_fields=["balance", "updated_at"])
 
         return Response(UserWalletSerializer(wallet).data, status=status.HTTP_200_OK)
+
+class SellerEarningsView(APIView):
+    """
+    GET  /api/seller/earnings/ -> Inspects seller's ledger balance & payout history.
+    POST /api/seller/payout/   -> Requests a withdrawal against available liability balance.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        account = get_or_create_seller_payable_account(request.user)
+
+        # Aggregate total gross credits (earnings) vs total debits (payouts)
+        totals = account.entries.aggregate(
+            earned=Sum("amount", filter=Q(entry_type=LedgerEntry.EntryType.CREDIT)),
+            disbursed=Sum("amount", filter=Q(entry_type=LedgerEntry.EntryType.DEBIT)),
+        )
+
+        data = {
+            "seller_id": request.user.id,
+            "username": request.user.username,
+            "payable_account_code": account.code,
+            "available_balance": account.current_balance,
+            "total_earned": totals["earned"] or Decimal("0.00"),
+            "total_paid_out": totals["disbursed"] or Decimal("0.00"),
+        }
+        return Response(SellerEarningsSerializer(data).data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        serializer = SellerPayoutRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        amount = serializer.validated_data["amount"]
+        payout_ref = f"po_{uuid.uuid4().hex[:12]}"
+
+        try:
+            txn = record_seller_payout_ledger(
+                seller=request.user,
+                amount=amount,
+                payout_ref=payout_ref,
+            )
+        except AuctionDomainException as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        account = get_or_create_seller_payable_account(request.user)
+        return Response(
+            {
+                "message": "Payout initiated successfully.",
+                "transaction_id": str(txn.id),
+                "reference_id": txn.reference_id,
+                "amount": str(amount),
+                "remaining_balance": str(account.current_balance),
+            },
+            status=status.HTTP_201_CREATED,
+        )
