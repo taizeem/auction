@@ -7,9 +7,9 @@ from channels.layers import get_channel_layer
 from rest_framework import generics, permissions, filters, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.generics import get_object_or_404
+from rest_framework.generics import get_object_or_404, ListAPIView
 from django.db import transaction
-from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer, UserWallet, LedgerEntry, LedgerAccount
+from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer, UserWallet, LedgerEntry, Watchlist
 from .services import (
     execute_proxy_bid, 
     AuctionDomainException, 
@@ -34,7 +34,8 @@ from .serializers import (
     UserWalletSerializer,
     WalletDepositFundSerializer,
     SellerEarningsSerializer,
-    SellerPayoutRequestSerializer
+    SellerPayoutRequestSerializer,
+    WatchlistSerializer,
 )
 from .pagination import StandardResultsSetPagination
 
@@ -435,4 +436,60 @@ class SellerEarningsView(APIView):
                 "remaining_balance": str(account.current_balance),
             },
             status=status.HTTP_201_CREATED,
+        )
+
+class WatchlistToggleView(APIView):
+    """
+    POST /api/auctions/<pk>/watch/
+    Toggles the watchlist state for the authenticated user.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            auction = Auction.objects.get(id=pk)
+        except Auction.DoesNotExist:
+            return Response(
+                {"detail": "Auction not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        watch_item, created = Watchlist.objects.get_or_create(
+            user=request.user,
+            auction=auction,
+        )
+
+        if not created:
+            # If already watching, untoggle (remove)
+            watch_item.delete()
+            is_watching = False
+            message = "Removed from watchlist."
+        else:
+            is_watching = True
+            message = "Added to watchlist."
+
+        return Response(
+            {
+                "message": message,
+                "is_watching": is_watching,
+                "auction_id": str(auction.id),
+                "total_watchers": auction.watchers.count(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class WatchlistListView(ListAPIView):
+    """
+    GET /api/watchlist/
+    Returns list of auctions watched by the authenticated user.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = WatchlistSerializer
+
+    def get_queryset(self):
+        return (
+            Watchlist.objects.filter(user=self.request.user)
+            .select_related("auction", "auction__highest_bidder")
+            .order_by("-created_at")
         )

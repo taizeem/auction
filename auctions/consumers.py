@@ -303,3 +303,10 @@ class AuctionConsumer(AsyncJsonWebsocketConsumer):
             "data": event.get("data") or {},
         })
 
+    async def ending_soon_alert(self, event):
+        """Pushes real-time ending soon notification to watched users."""
+        await self.send_json({
+            "type": "ending_soon_alert",
+            "data": event.get("data") or {},
+        })
+

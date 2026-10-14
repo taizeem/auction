@@ -13,6 +13,8 @@ from .views import (
     SecondChanceOfferRespondView,
     UserWalletView,
     SellerEarningsView,
+    WatchlistListView,
+    WatchlistToggleView,
 )
 
 urlpatterns = [
@@ -30,4 +32,6 @@ urlpatterns = [
     path("wallet/", UserWalletView.as_view(), name="user_wallet"),
     path("seller/earnings/", SellerEarningsView.as_view(), name="seller_earnings"),
     path("seller/payout/", SellerEarningsView.as_view(), name="seller_payout"),
+    path("auctions/<uuid:pk>/watch/", WatchlistToggleView.as_view(), name="auction_watch_toggle"),
+    path("watchlist/", WatchlistListView.as_view(), name="watchlist_list"),
 ]
