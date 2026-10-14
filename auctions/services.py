@@ -6,6 +6,21 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from .models import Auction, Bid, ProxyBid, Order, SecondChanceOffer, UserWallet, DepositHold, LedgerAccount, LedgerEntry, LedgerTransaction
 
+BID_INCREMENT_TIERS = [
+    (Decimal("100.00"), Decimal("1.00")),
+    (Decimal("500.00"), Decimal("5.00")),
+    (Decimal("1000.00"), Decimal("25.00")),
+    (Decimal("5000.00"), Decimal("50.00")),
+    (Decimal("Infinity"), Decimal("100.00")),
+]
+
+def get_minimum_bid_increment(current_price: Decimal) -> Decimal:
+    """Calculates the minimum required bid increment based on price brackets."""
+    price = Decimal(str(current_price))
+    for upper_bound, increment in BID_INCREMENT_TIERS:
+        if price < upper_bound:
+            return increment
+    return Decimal("100.00")
 DEPOSIT_HOLD_PERCENTAGE = Decimal("0.10")
 def calculate_required_deposit(amount: Decimal) -> Decimal:
     """Calculates 10% hold rounded to nearest cent."""
@@ -73,14 +88,18 @@ def execute_proxy_bid(
 
     # 4. Minimum required bid calculation
     current_highest_bid = auction.bids.order_by("-amount", "-created_at").first()
+    current_highest_bid = (
+        auction.bids.order_by("-amount", "-created_at").first()
+    )
     if not current_highest_bid:
         min_bid = auction.starting_price
     elif auction.highest_bidder == user:
         min_bid = auction.current_price
     else:
-        min_bid = auction.current_price + Decimal("5.00")
+        # Dynamic increment evaluated at the current standing price
+        increment = get_minimum_bid_increment(auction.current_price)
+        min_bid = auction.current_price + increment
 
-    # 5. Validate minimum bid increment BEFORE checking deposit balance
     if target_budget < min_bid:
         raise AuctionDomainException(f"Bid budget must be at least ${min_bid}.")
 
@@ -122,12 +141,16 @@ def execute_proxy_bid(
         if leading_proxy.max_amount == runner_up_proxy.max_amount:
             new_price = leading_proxy.max_amount
         else:
-            calculated_step = runner_up_proxy.max_amount + Decimal("5.00")
+            # Dynamic step evaluated against the runner-up's price level
+            step_increment = get_minimum_bid_increment(runner_up_proxy.max_amount)
+            calculated_step = runner_up_proxy.max_amount + step_increment
             new_price = min(leading_proxy.max_amount, calculated_step)
 
     auction.current_price = new_price
     auction.highest_bidder = leading_proxy.bidder
-    auction.save(update_fields=["current_price", "highest_bidder", "ends_at", "updated_at"])
+    auction.save(
+        update_fields=["current_price", "highest_bidder", "ends_at", "updated_at"]
+    )
 
     # 11. Record the public bid entry
     bid = Bid.objects.create(

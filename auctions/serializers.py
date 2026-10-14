@@ -38,6 +38,7 @@ class AuctionSerializer(serializers.ModelSerializer):
             "buy_it_now_price",
             "has_reserve",
             "is_reserve_met",
+            "next_minimum_bid",
             "highest_bidder",
             "highest_bidder_username",
             "status",

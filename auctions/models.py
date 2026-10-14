@@ -70,6 +70,14 @@ class Auction(models.Model):
         if not self.reserve_price:
             return True
         return self.current_price >= self.reserve_price
+    @property
+    def next_minimum_bid(self) -> Decimal:
+        """Computes the minimum next allowable bid for competitors."""
+        from .services import get_minimum_bid_increment
+
+        if not self.bids.exists():
+            return self.starting_price
+        return self.current_price + get_minimum_bid_increment(self.current_price)
 
 
 class Bid(models.Model):
