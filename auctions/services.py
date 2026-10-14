@@ -57,7 +57,6 @@ def get_minimum_increment(current_price: Decimal) -> Decimal:
         return Decimal("25.00")
     return Decimal("50.00")
 
-
 @transaction.atomic
 def execute_proxy_bid(
     auction_id: str,
@@ -90,7 +89,7 @@ def execute_proxy_bid(
             "This auction has expired and is no longer accepting bids."
         )
 
-    # 1. Minimum required bid calculation using dynamic bracket increment
+    # 1. Dynamic minimum bid threshold
     current_highest_bid = (
         auction.bids.order_by("-amount", "-created_at").first()
     )
@@ -104,11 +103,11 @@ def execute_proxy_bid(
             auction.current_price
         )
 
-    # 2. Validate minimum increment BEFORE checking wallet funds
+    # 2. Reject budget lower than dynamic minimum
     if target_budget < min_bid:
         raise AuctionDomainException(f"Bid budget must be at least ${min_bid}.")
 
-    # 3. Acquire or adjust 10% security deposit hold
+    # 3. 10% security deposit hold
     acquire_or_adjust_deposit_hold(user, auction, target_budget)
 
     # 4. Anti-sniping soft-close window extension
@@ -139,7 +138,7 @@ def execute_proxy_bid(
     leading_proxy = proxies[0]
     runner_up_proxy = proxies[1] if len(proxies) > 1 else None
 
-    # 7. Compute new public standing price using dynamic increment step
+    # 7. Compute new standing price using dynamic increment step
     if not runner_up_proxy:
         new_price = max(auction.starting_price, auction.current_price)
     else:
@@ -209,121 +208,6 @@ def execute_proxy_bid(
         "extended": extended,
     }
 
-@transaction.atomic
-def execute_proxy_bid(
-    auction_id: str,
-    user,
-    max_amount: Decimal = None,
-    amount: Decimal = None,
-) -> dict:
-    target_budget = max_amount if max_amount is not None else amount
-    if target_budget is None:
-        raise AuctionDomainException("A valid bid budget must be provided.")
-    target_budget = Decimal(str(target_budget))
-
-    try:
-        auction = Auction.objects.select_for_update().get(id=auction_id)
-    except Auction.DoesNotExist:
-        raise AuctionDomainException("Auction not found.")
-
-    if auction.seller_id and auction.seller_id == user.id:
-        raise AuctionDomainException("Sellers are not permitted to bid on their own auctions.")
-
-    now = timezone.now()
-
-    if auction.status != Auction.Status.ACTIVE or auction.is_expired:
-        if auction.status == Auction.Status.ACTIVE:
-            auction.status = Auction.Status.CLOSED
-            auction.save(update_fields=["status", "updated_at"])
-        raise AuctionDomainException("This auction has expired and is no longer accepting bids.")
-
-    current_highest_bid = auction.bids.order_by("-amount", "-created_at").first()
-    if not current_highest_bid:
-        min_bid = auction.starting_price
-    elif auction.highest_bidder == user:
-        min_bid = auction.current_price
-    else:
-        min_bid = auction.current_price + Decimal("5.00")
-
-    if target_budget < min_bid:
-        raise AuctionDomainException(f"Bid budget must be at least ${min_bid}.")
-
-    acquire_or_adjust_deposit_hold(user, auction, target_budget)
-
-    extended = False
-    if (auction.ends_at - now).total_seconds() <= 120:
-        auction.ends_at = auction.ends_at + timedelta(seconds=120)
-        extended = True
-
-    previous_leader = auction.highest_bidder
-
-    proxy_bid, _ = ProxyBid.objects.select_for_update().get_or_create(
-        auction=auction,
-        bidder=user,
-        defaults={"max_amount": target_budget},
-    )
-    if proxy_bid.max_amount != target_budget:
-        proxy_bid.max_amount = target_budget
-        proxy_bid.save(update_fields=["max_amount", "updated_at"])
-
-    proxies = list(
-        ProxyBid.objects.select_for_update()
-        .filter(auction=auction)
-        .order_by("-max_amount", "created_at")[:2]
-    )
-
-    leading_proxy = proxies[0]
-    runner_up_proxy = proxies[1] if len(proxies) > 1 else None
-
-    if not runner_up_proxy:
-        new_price = max(auction.starting_price, auction.current_price)
-    else:
-        if leading_proxy.max_amount == runner_up_proxy.max_amount:
-            new_price = leading_proxy.max_amount
-        else:
-            calculated_step = runner_up_proxy.max_amount + Decimal("5.00")
-            new_price = min(leading_proxy.max_amount, calculated_step)
-
-    auction.current_price = new_price
-    auction.highest_bidder = leading_proxy.bidder
-    auction.save(update_fields=["current_price", "highest_bidder", "ends_at", "updated_at"])
-
-    Bid.objects.create(
-        auction=auction,
-        bidder=auction.highest_bidder,
-        amount=auction.current_price,
-    )
-
-    if previous_leader and auction.highest_bidder != previous_leader:
-        prev_proxy = ProxyBid.objects.filter(auction=auction, bidder=previous_leader).first()
-        if prev_proxy and prev_proxy.max_amount <= auction.current_price:
-            release_deposit_hold(previous_leader, auction)
-
-        channel_layer = get_channel_layer()
-        if channel_layer:
-            async_to_sync(channel_layer.group_send)(
-                f"user_{previous_leader.id}",
-                {
-                    "type": "targeted_outbid_alert",
-                    "data": {
-                        "auction_id": str(auction.id),
-                        "auction_title": auction.title,
-                        "new_price": str(auction.current_price),
-                        "message": f"You have been outbid on '{auction.title}'. Current price: ${auction.current_price}.",
-                    },
-                },
-            )
-
-
-    return {
-        "auction_id": str(auction.id),
-        "current_price": str(auction.current_price),
-        "amount": str(auction.current_price),  # Satisfies views expecting 'amount'
-        "highest_bidder": auction.highest_bidder.username,
-        "your_max_budget": str(target_budget),
-        "ends_at": auction.ends_at.isoformat(),
-        "extended": extended,
-    }
 
 
 def execute_bid(auction_id: str, user, amount: Decimal) -> dict:
